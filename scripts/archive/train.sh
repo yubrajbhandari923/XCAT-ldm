@@ -1,12 +1,8 @@
 #!/bin/bash
 cd /home/yb107/cvpr2025/DukeDiffSeg
 
-
-SUFFIX="_ldm"
-
-LOGDIR="/home/yb107/logs"
-LOGFILE="/home/yb107/logs/train${SUFFIX}.log"
-PIDFILE="/home/yb107/logs/train${SUFFIX}.pid"
+LOGFILE="/home/yb107/logs/train_.log"
+PIDFILE="/home/yb107/logs/train_.pid"
 
 # Clean up any old PID file
 if [ -f "$PIDFILE" ]; then
@@ -21,15 +17,8 @@ fi
 
 
 # Launch in new process group with setsid
-pipenv run bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 OMP_NUM_THREADS=8 setsid nohup python -m train.ldm_1_0 \
-  training.num_gpus=8 \
-  experiment.debug=False \
-  data.save_data=False \
-  data.batch_size_per_gpu=2 \
-  hydra.job.chdir=false \
-  hydra.run.dir=$LOGDIR \
-  experiment.version=1.2 \
-  > $LOGFILE 2>&1 & echo \$! > $PIDFILE"
+pipenv run bash -c "CUDA_VISIBLE_DEVICES=6,7 OMP_NUM_THREADS=8 setsid nohup python -m train.diffunet_1_0 \
+  --exp_config /home/yb107/cvpr2025/DukeDiffSeg/configs/experiments/diffunet.yaml > $LOGFILE 2>&1 & echo \$! > $PIDFILE"
 
 echo "🚀 Training started — logs: $LOGFILE"
 echo "📄 Main PID saved to: $PIDFILE"

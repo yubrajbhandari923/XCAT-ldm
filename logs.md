@@ -168,3 +168,61 @@ MAISI-like: Train a purely diffusion model, then implement control net.
 
 
 
+## 🧪 Experiment Log – 2025-08-09
+# A recap of Everything so far
+Problem statement:
+XCAT phantoms mostly have every good. But Colons in some of the phantoms were extremely bad, they were manually graded by an MD, quality controlled and removed from the released phantoms. We want to fix the colon on such cases to get good phantoms.
+
+1st approach: Improved Segmentation
+Since we donot have explicit ground truth, using pseudo-label and trying to segment the same cases didn't work.
+
+2nd approach in-painting:
+
+
+## 🧪 Experiment Log – 2025-09-01
+
+# What's so far?
+Got a AE to compress and reconstructe to/from latent, but since it was trained only on recon loss (ldm1.2) it could only reconstruct low frequency information.
+
+Which is what literature says recon loss does. Also Dicece is equivalent to MSE for recon loss
+
+# Experiments Upnext
+Start from Basics.
+Problem Formulation: Inpainting: Given surrounding organs sample from colon+bowel distribution to fill the segmentation mask. 
+
+
+## 🧪 Experiment Log – 2025-09-05
+
+SDF worked!!
+DiffUNET 4.7 is out.
+
+Experiments Up Next:
+- DiffUNet 4.8 l2_loss + bce + cIDice
+- DiffUNet 4.9 l1_loss + bce (without pos_weight) + cIDice
+- DiffUNet 4.10 Add cond_drop to experiment with classifer free guidance
+- DiffUNet 4.11 SDF band loss + l1_loss + bce + cIDice
+- DiffUNet 4.12 Replace BCE with Focal-Tversky
+- DiffUNet 4.13 l1_loss + bce + 1e4 * CIDice
+- DiffUNet 5.0 Add a patch GAN
+- Berdiff
+- Explore Topological Losses
+- Second Jab at LDM 
+- Generate Variations of same Case
+- Generate Whole Abdomen with iterative generation of organs
+- Betti-Matching / Euler Characterisitcs
+
+
+
+
+## 🧪 Experiment Log – 2025-10-07
+
+Meeting Notes: 
+- Fix the start/ end of tube no erosion/dialation
+- Volume Quality Control
+- Medical Student Verification
+- Number of connected component
+
+- MedshapeNet for fixing things ?
+- 
+
+Show statistical improvement. 

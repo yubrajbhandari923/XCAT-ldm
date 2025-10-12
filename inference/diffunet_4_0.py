@@ -1,0 +1,1 @@
+/home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-multi_class_no_colon-colon/4.0/train_script.py

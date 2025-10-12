@@ -25,6 +25,10 @@ import numpy as np
 import torch
 from monai.visualize.img2tensorboard import plot_2d_or_3d_image
 from .visualize import Visualizer, render3d
+from typing import Union, Optional, Tuple, List
+from .loss import SoftSkeletonize 
+# from skimage.morphology import skeletonize_3d
+
 
 import random
 from collections import deque
@@ -633,3 +637,882 @@ class SaveLabelsSeperate(MapTransform):
                 )(img_copy)
 
         return data
+
+def _default_select_fn(x):
+    return x > 0
+
+class CropForegroundAxisd(MapTransform):
+    """
+    Crop the tensors in `keys` along a single spatial axis based on the foreground
+    of `source_key`. Other axes are left untouched.
+    """
+
+    def __init__(self, keys, source_key, axis=0, select_fn=_default_select_fn, margin=5):
+        if not isinstance(keys, (list, tuple)):
+            keys = [keys]
+        super().__init__(keys)
+        if axis not in (0, 1, 2):
+            raise ValueError(f"`axis` must be 0, 1, or 2; got {axis}")
+        if margin < 0:
+            raise ValueError("`margin` must be >= 0")
+        self.keys = list(keys)
+        self.source_key = source_key
+        self.axis = axis
+        self.select_fn = select_fn
+        self.margin = margin
+
+    def _to_tensor(self, x):
+        return x if isinstance(x, torch.Tensor) else torch.as_tensor(x)
+
+    def _get_spatial_axis_index(self, arr_ndim: int) -> int:
+        if arr_ndim < 3:
+            raise ValueError(
+                f"Input must have at least 3 dims (D,H,W). Got ndim={arr_ndim}"
+            )
+        # spatial dims are the last 3 dims
+        return arr_ndim - 3 + self.axis
+
+    def _compute_crop_indices(self, src):
+        t = self._to_tensor(src)
+
+        # Reduce all non-spatial dims to a 3D spatial volume (D,H,W)
+        if t.ndim == 3:
+            spatial = t
+        else:
+            n_spatial = 3
+            reduce_dims = tuple(range(t.ndim - n_spatial))  # e.g., (0,) for C,D,H,W
+            spatial = t.any(dim=reduce_dims).to(t.dtype)
+
+        mask = self.select_fn(spatial)
+        mask = mask if isinstance(mask, torch.Tensor) else torch.as_tensor(mask)
+        mask = mask.bool()
+
+        if mask.ndim != 3:
+            raise ValueError(f"Foreground mask must be 3D; got {tuple(mask.shape)}")
+
+        axis = self.axis
+        other = tuple(d for d in (0, 1, 2) if d != axis)
+        # ↓↓↓ fix: reduce both non-axis dims at once to get a 1D presence vector
+        presence_1d = mask.any(dim=other)
+
+        if not presence_1d.any():
+            return None
+
+        idxs = presence_1d.nonzero(as_tuple=False).squeeze(-1)
+        start = int(idxs.min().item())
+        end_inclusive = int(idxs.max().item())
+        size_axis = mask.shape[axis]
+
+        start = max(0, start - self.margin)
+        end = min(size_axis, end_inclusive + 1 + self.margin)  # [start, end)
+
+        # Safety: never empty
+        if end <= start:
+            center = int((idxs.float().mean().round().item()))
+            start = max(0, min(center, size_axis - 1))
+            end = start + 1
+
+        return start, end
+
+    def __call__(self, data):
+        d = dict(data)
+
+        if self.source_key not in d:
+            return d
+
+        crop_range = self._compute_crop_indices(d[self.source_key])
+        if crop_range is None:
+            return d  # nothing to crop
+
+        start, end = crop_range
+
+        def _safe_crop(arr):
+            arr_ndim = arr.ndim if hasattr(arr, "ndim") else np.asarray(arr).ndim
+            gaxis = self._get_spatial_axis_index(arr_ndim)
+            slicers = [slice(None)] * arr_ndim
+            slicers[gaxis] = slice(start, end)
+            out = arr[tuple(slicers)]
+            # --------- NEW: safety net, avoid 0-size dim ----------
+            if out.shape[gaxis] == 0:
+                return arr  # fallback to no crop for this key
+            # ------------------------------------------------------
+            return out
+
+        for key in self.keys:
+            if key not in d:
+                continue
+            d[key] = _safe_crop(d[key])
+
+            meta_key = f"{key}_meta_dict"
+            if meta_key in d and isinstance(d[meta_key], dict):
+                d[meta_key]["spatial_shape"] = np.asarray(
+                    d[key].shape[-3:], dtype=np.int64
+                )
+
+        # Also crop source_key itself if it's not already included
+        if self.source_key not in self.keys and self.source_key in d:
+            d[self.source_key] = _safe_crop(d[self.source_key])
+            meta_key = f"{self.source_key}_meta_dict"
+            if meta_key in d and isinstance(d[meta_key], dict):
+                d[meta_key]["spatial_shape"] = np.asarray(
+                    d[self.source_key].shape[-3:], dtype=np.int64
+                )
+
+        return d
+
+
+import numpy as np
+from typing import Union
+from monai.transforms import Transform
+from monai.config import KeysCollection
+from scipy.ndimage import (
+    binary_dilation,
+    binary_erosion,
+    generate_binary_structure,
+    distance_transform_edt,
+    label,
+)
+import torch
+
+
+class SmoothColonMask(Transform):
+    """
+    Enhanced colon mask smoothing with preprocessing steps.
+
+    Processing pipeline:
+    1. BREAK THIN NECKS: Remove thin connections (appendages connected by few voxels)
+    2. DROP SMALL COMPONENTS: Remove components below volume threshold
+    3. DILATE: Expand mask outward (fills gaps, connects close parts, smooths bumps)
+    4. ERODE: Shrink back by same amount (returns to original size but smoothed)
+
+    Args:
+        iterations: Number of dilation/erosion iterations for smoothing (default: 3)
+                   Higher = more aggressive smoothing. Typical range: 2-5
+
+        connectivity: Structuring element connectivity (1, 2, or 3)
+                     1 = face connectivity (6-connected in 3D)
+                     2 = face+edge connectivity (18-connected in 3D)
+                     3 = face+edge+corner connectivity (26-connected in 3D)
+                     Default: 2 (good balance)
+
+        min_neck_thickness: Minimum thickness for connections in voxels (default: 3)
+                           Connections thinner than this will be broken
+                           Set to 0 to disable neck breaking
+
+        min_component_ratio: Minimum component size as ratio of largest component (default: 0.1)
+                            Components smaller than this ratio will be removed
+                            E.g., 0.1 means drop components < 10% of largest
+                            Set to 0 to keep all components
+    """
+
+    def __init__(
+        self,
+        iterations: int = 3,
+        connectivity: int = 2,
+        min_neck_thickness: int = 3,
+        min_component_ratio: float = 0.1,
+    ):
+        self.iterations = iterations
+        self.connectivity = connectivity
+        self.min_neck_thickness = min_neck_thickness
+        self.min_component_ratio = min_component_ratio
+
+        # Create structuring element for dilation/erosion
+        self.struct_element = generate_binary_structure(3, connectivity)
+
+    def _break_thin_necks(self, mask: np.ndarray) -> np.ndarray:
+        """
+        Break thin connections (necks) between regions.
+        Uses distance transform to identify thin structures.
+
+        Args:
+            mask: Binary mask
+
+        Returns:
+            Mask with thin necks removed
+        """
+        if self.min_neck_thickness <= 0:
+            return mask
+
+        # Compute distance transform
+        # Each voxel's value = distance to nearest background voxel
+        dist_transform = distance_transform_edt(mask)
+
+        # Identify thin regions: where distance to edge is very small
+        # If a region has radius < min_neck_thickness/2, it's a thin neck
+        thin_threshold = self.min_neck_thickness / 2.0
+
+        # Keep only voxels that are "thick enough"
+        thick_mask = dist_transform >= thin_threshold
+
+        # Combine: keep voxels that are both in original mask AND thick enough
+        result = mask & thick_mask
+
+        return result
+
+    def _remove_small_components(self, mask: np.ndarray) -> np.ndarray:
+        """
+        Remove connected components below size threshold.
+
+        Args:
+            mask: Binary mask
+
+        Returns:
+            Mask with small components removed
+        """
+        if self.min_component_ratio <= 0:
+            return mask
+
+        # Label connected components
+        labeled_mask, num_components = label(mask)
+
+        if num_components == 0:
+            return mask
+
+        # Calculate size of each component
+        component_sizes = {}
+        for i in range(1, num_components + 1):
+            component_sizes[i] = np.sum(labeled_mask == i)
+
+        # Find largest component
+        max_size = max(component_sizes.values())
+        threshold_size = max_size * self.min_component_ratio
+
+        # Create output mask with only large components
+        result = np.zeros_like(mask, dtype=bool)
+        for component_label, size in component_sizes.items():
+            if size >= threshold_size:
+                result |= labeled_mask == component_label
+
+        return result
+
+    def _smooth_morphological(self, mask: np.ndarray) -> np.ndarray:
+        """
+        Smooth mask using dilation followed by erosion (morphological closing).
+
+        Args:
+            mask: Binary mask
+
+        Returns:
+            Smoothed mask
+        """
+        # STEP 1: Dilate (expand outward)
+        dilated = mask.copy()
+        for _ in range(self.iterations):
+            dilated = binary_dilation(dilated, structure=self.struct_element)
+
+        # STEP 2: Erode (shrink back)
+        smoothed = dilated.copy()
+        for _ in range(self.iterations):
+            smoothed = binary_erosion(smoothed, structure=self.struct_element)
+
+        return smoothed
+
+    def __call__(
+        self, mask: Union[np.ndarray, torch.Tensor]
+    ) -> Union[np.ndarray, torch.Tensor]:
+        """
+        Apply full processing pipeline to mask with smart early exits.
+
+        Logic:
+        - If already single component → skip everything, return as-is
+        - After neck breaking + component removal:
+          - If single component remains → skip dilation/erosion
+          - If multiple components → apply dilation/erosion for smoothing
+
+        Args:
+            mask: Binary segmentation mask
+
+        Returns:
+            Processed mask in same format as input
+        """
+        # Handle torch tensors
+        is_torch = isinstance(mask, torch.Tensor)
+        if is_torch:
+            device = mask.device
+            dtype = mask.dtype
+            mask_np = mask.detach().cpu().numpy()
+        else:
+            mask_np = mask.copy()
+
+        # Ensure binary
+        mask_np = mask_np.astype(bool)
+
+        # Handle channel dimension
+        squeeze_dim = False
+        if mask_np.ndim == 4 and mask_np.shape[0] == 1:
+            mask_np = mask_np[0]
+            squeeze_dim = True
+
+        # EARLY EXIT CHECK: If already single component, skip all processing
+        _, num_components_initial = label(mask_np)
+
+        if num_components_initial <= 1:
+            # Already clean, return as-is
+            result = mask_np
+        else:
+            # Multiple components detected, proceed with processing
+
+            # Step 1: Break thin necks (if enabled)
+            if self.min_neck_thickness > 0:
+                result = self._break_thin_necks(mask_np)
+            else:
+                result = mask_np
+
+            # Step 2: Remove small components (if enabled)
+            if self.min_component_ratio > 0:
+                result = self._remove_small_components(result)
+            else:
+                result = result
+
+            # Check components after preprocessing
+            _, num_components_after_prep = label(result)
+
+            # Step 3: Apply smoothing only if multiple components remain
+            # (smoothing helps join/blend multiple regions)
+            if num_components_after_prep > 1:
+                result = self._smooth_morphological(result)
+            # else: single component after preprocessing, skip smoothing
+
+        # Restore dimensions
+        if squeeze_dim:
+            result = result[np.newaxis, ...]
+
+        # Convert back to torch if needed
+        if is_torch:
+            result = torch.from_numpy(result.astype(np.float32)).to(
+                device=device, dtype=dtype
+            )
+
+        return result
+
+
+class SmoothColonMaskSkeld(Transform):
+    """
+    Dictionary-based version for MONAI pipelines.
+
+    Args:
+        keys: Keys to apply transform to
+        iterations: Number of dilation/erosion iterations (default: 3)
+        connectivity: Structuring element connectivity (1, 2, or 3)
+        min_neck_thickness: Minimum thickness for connections in voxels (default: 3)
+        min_component_ratio: Minimum component size ratio (default: 0.1)
+        allow_missing_keys: Don't raise error for missing keys
+    """
+
+    def __init__(
+        self,
+        keys: KeysCollection,
+        iterations: int = 3,
+        connectivity: int = 2,
+        min_neck_thickness: int = 3,
+        min_component_ratio: float = 0.1,
+        allow_missing_keys: bool = False,
+    ):
+        self.keys = keys if isinstance(keys, (list, tuple)) else [keys]
+        self.transform = SmoothColonMask(
+            iterations=iterations,
+            connectivity=connectivity,
+            min_neck_thickness=min_neck_thickness,
+            min_component_ratio=min_component_ratio,
+        )
+        self.allow_missing_keys = allow_missing_keys
+
+    def __call__(self, data: dict) -> dict:
+        """Apply transform to dictionary"""
+        d = dict(data)
+        for key in self.keys:
+            if key in d:
+                d[key] = self.transform(d[key])
+            elif not self.allow_missing_keys:
+                raise KeyError(f"Key '{key}' not found in data")
+        return d
+
+
+class SmoothColonMaskSkel(Transform):
+    """
+    Enhanced colon mask smoothing with endpoint protection and anatomical awareness.
+
+    Processing pipeline:
+    1. (Optional) Identify and protect colon endpoints using skeleton + anatomical orientation
+    2. Break thin necks in middle regions only
+    3. Remove small components
+    4. Apply dilation-erosion smoothing (excluding protected endpoints)
+    5. Merge protected endpoints with smoothed middle
+
+    Args:
+        iterations: Number of dilation/erosion iterations for smoothing (default: 3)
+        connectivity: Structuring element connectivity (1, 2, or 3) (default: 2)
+        min_neck_thickness: Minimum thickness for connections in voxels (default: 3)
+        min_component_ratio: Minimum component size ratio (default: 0.1)
+        protect_endpoints: Whether to protect colon endpoints from smoothing (default: True)
+        endpoint_protection_radius: Radius of protection zone around endpoints (default: 8)
+        data_orientation: Anatomical orientation to identify correct endpoints (default: "RAS")
+                         Format: three letters indicating positive direction for [x, y, z]
+                         - R/L: Right/Left
+                         - A/P: Anterior/Posterior
+                         - S/I: Superior/Inferior
+                         Common: "RAS" (Right-Anterior-Superior)
+
+                         For colon: ascending starts lower-right, descending ends lower-left
+    """
+
+    def __init__(
+        self,
+        iterations: int = 3,
+        connectivity: int = 2,
+        min_neck_thickness: int = 3,
+        min_component_ratio: float = 0.1,
+        protect_endpoints: bool = True,
+        endpoint_protection_radius: int = 8,
+        data_orientation: str = "RAS",
+    ):
+        self.iterations = iterations
+        self.connectivity = connectivity
+        self.min_neck_thickness = min_neck_thickness
+        self.min_component_ratio = min_component_ratio
+        self.protect_endpoints = protect_endpoints
+        self.endpoint_protection_radius = endpoint_protection_radius
+        self.data_orientation = data_orientation.upper()
+
+        # Create structuring element for dilation/erosion
+        self.struct_element = generate_binary_structure(3, connectivity)
+
+        # Validate orientation string
+        if len(self.data_orientation) != 3:
+            raise ValueError(
+                f"data_orientation must be 3 characters, got: {self.data_orientation}"
+            )
+
+    def _parse_orientation(self) -> Tuple[int, int, int]:
+        """
+        Parse orientation string to determine anatomical directions.
+
+        Returns:
+            (lr_axis, ap_axis, si_axis): Axes for Left-Right, Anterior-Posterior, Superior-Inferior
+                                         Values are 0, 1, or 2 (for x, y, z)
+        """
+        orientation_map = {
+            "R": (0, 1),
+            "L": (0, -1),  # Right/Left on axis 0
+            "A": (1, 1),
+            "P": (1, -1),  # Anterior/Posterior on axis 1
+            "S": (2, 1),
+            "I": (2, -1),  # Superior/Inferior on axis 2
+        }
+
+        axes = []
+        directions = []
+
+        for char in self.data_orientation:
+            if char not in orientation_map:
+                raise ValueError(f"Invalid orientation character: {char}")
+            axis, direction = orientation_map[char]
+            axes.append(axis)
+            directions.append(direction)
+
+        return tuple(axes), tuple(directions)
+
+    def _get_skeleton_endpoints(self, mask: np.ndarray) -> List[Tuple[int, int, int]]:
+        """
+        Find endpoint voxels using skeletonization.
+
+        Args:
+            mask: Binary mask
+
+        Returns:
+            List of (x, y, z) coordinates of endpoint voxels
+        """
+        # Create skeleton (1-voxel thick centerline)
+        skeleton = skeletonize_3d(mask)
+
+        # Find skeleton voxels
+        skeleton_coords = np.argwhere(skeleton)
+
+        if len(skeleton_coords) == 0:
+            return []
+
+        # For each skeleton voxel, count 26-connected neighbors that are also skeleton
+        endpoints = []
+
+        for coord in skeleton_coords:
+            x, y, z = coord
+
+            # Check 26-neighborhood
+            neighbor_count = 0
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    for dz in [-1, 0, 1]:
+                        if dx == 0 and dy == 0 and dz == 0:
+                            continue
+
+                        nx, ny, nz = x + dx, y + dy, z + dz
+
+                        # Check bounds
+                        if (
+                            0 <= nx < skeleton.shape[0]
+                            and 0 <= ny < skeleton.shape[1]
+                            and 0 <= nz < skeleton.shape[2]
+                        ):
+                            if skeleton[nx, ny, nz]:
+                                neighbor_count += 1
+
+            # Endpoint has only 1 neighbor on skeleton
+            if neighbor_count == 1:
+                endpoints.append((x, y, z))
+
+        return endpoints
+
+    def _identify_colon_endpoints(
+        self, mask: np.ndarray
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        Identify ascending (start) and descending (end) colon endpoints using anatomical orientation.
+
+        Anatomical knowledge:
+        - Ascending colon: starts at cecum (lower right abdomen)
+        - Descending colon: ends at sigmoid/rectum (lower left abdomen)
+
+        Returns:
+            (start_coord, end_coord): Coordinates of start and end, or (None, None) if not found
+        """
+        # Get all candidate endpoints from skeleton
+        candidate_endpoints = self._get_skeleton_endpoints(mask)
+
+        if len(candidate_endpoints) < 2:
+            # Not enough endpoints found, return None
+            return None, None
+
+        # Parse orientation to understand spatial layout
+        axes, directions = self._parse_orientation()
+
+        # Find which axis corresponds to Left-Right and Superior-Inferior
+        lr_axis = None
+        si_axis = None
+        lr_direction = None
+        si_direction = None
+
+        for i, char in enumerate(self.data_orientation):
+            if char in ["R", "L"]:
+                lr_axis = axes[i]
+                lr_direction = directions[i]
+            elif char in ["S", "I"]:
+                si_axis = axes[i]
+                si_direction = directions[i]
+
+        if lr_axis is None or si_axis is None:
+            # Can't determine anatomical directions
+            return None, None
+
+        # Convert candidates to array for easier manipulation
+        candidates_array = np.array(candidate_endpoints)
+
+        # Ascending colon (cecum): inferior + right
+        # Descending colon end: inferior + left
+
+        # Find most inferior points (lowest in superior-inferior axis)
+        if si_direction > 0:  # S orientation, inferior is low values
+            inferior_threshold = np.percentile(candidates_array[:, si_axis], 30)
+            inferior_candidates = candidates_array[
+                candidates_array[:, si_axis] <= inferior_threshold
+            ]
+        else:  # I orientation, inferior is high values
+            inferior_threshold = np.percentile(candidates_array[:, si_axis], 70)
+            inferior_candidates = candidates_array[
+                candidates_array[:, si_axis] >= inferior_threshold
+            ]
+
+        if len(inferior_candidates) < 2:
+            # Fall back to all candidates
+            inferior_candidates = candidates_array
+
+        # Among inferior candidates, find rightmost and leftmost
+        if lr_direction > 0:  # R orientation
+            # Rightmost (highest value) = ascending start
+            # Leftmost (lowest value) = descending end
+            right_idx = np.argmax(inferior_candidates[:, lr_axis])
+            left_idx = np.argmin(inferior_candidates[:, lr_axis])
+        else:  # L orientation
+            # Leftmost (highest value) = descending end
+            # Rightmost (lowest value) = ascending start
+            right_idx = np.argmin(inferior_candidates[:, lr_axis])
+            left_idx = np.argmax(inferior_candidates[:, lr_axis])
+
+        start_coord = inferior_candidates[right_idx]  # Ascending (right)
+        end_coord = inferior_candidates[left_idx]  # Descending (left)
+
+        return start_coord, end_coord
+
+    def _create_endpoint_protection_mask(
+        self,
+        mask_shape: Tuple,
+        start_coord: Optional[np.ndarray],
+        end_coord: Optional[np.ndarray],
+    ) -> np.ndarray:
+        """
+        Create a binary mask marking protected regions around endpoints.
+
+        Args:
+            mask_shape: Shape of the mask
+            start_coord: Coordinates of start endpoint
+            end_coord: Coordinates of end endpoint
+
+        Returns:
+            Binary mask with True in protected regions
+        """
+        protection_mask = np.zeros(mask_shape, dtype=bool)
+
+        if start_coord is None and end_coord is None:
+            return protection_mask
+
+        # Create spherical protection zones around each endpoint
+        coords = np.indices(mask_shape)
+
+        for endpoint in [start_coord, end_coord]:
+            if endpoint is not None:
+                # Calculate distance from endpoint
+                dist_sq = sum((coords[i] - endpoint[i]) ** 2 for i in range(3))
+
+                # Mark voxels within protection radius
+                protection_mask |= dist_sq <= self.endpoint_protection_radius**2
+
+        return protection_mask
+
+    def _break_thin_necks(
+        self, mask: np.ndarray, protection_mask: Optional[np.ndarray] = None
+    ) -> np.ndarray:
+        """
+        Break thin connections (necks) between regions, excluding protected areas.
+
+        Args:
+            mask: Binary mask
+            protection_mask: Optional mask of regions to protect
+
+        Returns:
+            Mask with thin necks removed
+        """
+        if self.min_neck_thickness <= 0:
+            return mask
+
+        # Compute distance transform
+        dist_transform = distance_transform_edt(mask)
+
+        # Identify thin regions
+        thin_threshold = self.min_neck_thickness / 2.0
+        thick_mask = dist_transform >= thin_threshold
+
+        # Apply thin neck removal
+        result = mask & thick_mask
+
+        # Restore protected regions
+        if protection_mask is not None:
+            result = result | (mask & protection_mask)
+
+        return result
+
+    def _remove_small_components(self, mask: np.ndarray) -> np.ndarray:
+        """
+        Remove connected components below size threshold.
+
+        Args:
+            mask: Binary mask
+
+        Returns:
+            Mask with small components removed
+        """
+        if self.min_component_ratio <= 0:
+            return mask
+
+        labeled_mask, num_components = label(mask)
+
+        if num_components == 0:
+            return mask
+
+        # Calculate size of each component
+        component_sizes = {}
+        for i in range(1, num_components + 1):
+            component_sizes[i] = np.sum(labeled_mask == i)
+
+        # Find largest component
+        max_size = max(component_sizes.values())
+        threshold_size = max_size * self.min_component_ratio
+
+        # Create output mask with only large components
+        result = np.zeros_like(mask, dtype=bool)
+        for component_label, size in component_sizes.items():
+            if size >= threshold_size:
+                result |= labeled_mask == component_label
+
+        return result
+
+    def _smooth_morphological(
+        self, mask: np.ndarray, protection_mask: Optional[np.ndarray] = None
+    ) -> np.ndarray:
+        """
+        Smooth mask using dilation followed by erosion, excluding protected regions.
+
+        Args:
+            mask: Binary mask
+            protection_mask: Optional mask of regions to protect
+
+        Returns:
+            Smoothed mask
+        """
+        # Extract regions to smooth
+        if protection_mask is not None:
+            protected_region = mask & protection_mask
+            smoothing_region = mask & ~protection_mask
+        else:
+            protected_region = None
+            smoothing_region = mask
+
+        # Apply dilation-erosion to smoothing region only
+        dilated = smoothing_region.copy()
+        for _ in range(self.iterations):
+            dilated = binary_dilation(dilated, structure=self.struct_element)
+
+        smoothed = dilated.copy()
+        for _ in range(self.iterations):
+            smoothed = binary_erosion(smoothed, structure=self.struct_element)
+
+        # Merge back with protected region
+        if protected_region is not None:
+            result = smoothed | protected_region
+        else:
+            result = smoothed
+
+        return result
+
+    def __call__(
+        self, mask: Union[np.ndarray, torch.Tensor]
+    ) -> Union[np.ndarray, torch.Tensor]:
+        """
+        Apply full processing pipeline to mask with smart early exits and endpoint protection.
+
+        Args:
+            mask: Binary segmentation mask
+
+        Returns:
+            Processed mask in same format as input
+        """
+        # Handle torch tensors
+        is_torch = isinstance(mask, torch.Tensor)
+        if is_torch:
+            device = mask.device
+            dtype = mask.dtype
+            mask_np = mask.detach().cpu().numpy()
+        else:
+            mask_np = mask.copy()
+
+        # Ensure binary
+        mask_np = mask_np.astype(bool)
+
+        # Handle channel dimension
+        squeeze_dim = False
+        if mask_np.ndim == 4 and mask_np.shape[0] == 1:
+            mask_np = mask_np[0]
+            squeeze_dim = True
+
+        # EARLY EXIT CHECK: If already single component, skip all processing
+        _, num_components_initial = label(mask_np)
+
+        if num_components_initial <= 1 and not self.protect_endpoints:
+            # Already clean and no endpoint protection needed
+            result = mask_np
+        else:
+            # Step 0: Identify and protect endpoints if enabled
+            protection_mask = None
+            if self.protect_endpoints:
+                start_coord, end_coord = self._identify_colon_endpoints(mask_np)
+                if start_coord is not None or end_coord is not None:
+                    protection_mask = self._create_endpoint_protection_mask(
+                        mask_np.shape, start_coord, end_coord
+                    )
+
+            # Proceed with processing if multiple components
+            if num_components_initial > 1:
+                # Step 1: Break thin necks (avoiding protected regions)
+                if self.min_neck_thickness > 0:
+                    result = self._break_thin_necks(mask_np, protection_mask)
+                else:
+                    result = mask_np
+
+                # Step 2: Remove small components
+                if self.min_component_ratio > 0:
+                    result = self._remove_small_components(result)
+
+                # Check components after preprocessing
+                _, num_components_after_prep = label(result)
+
+                # Step 3: Apply smoothing if multiple components remain
+                if num_components_after_prep > 1:
+                    result = self._smooth_morphological(result, protection_mask)
+            else:
+                # Single component, but we may still want to smooth (avoiding endpoints)
+                if self.iterations > 0:
+                    result = self._smooth_morphological(mask_np, protection_mask)
+                else:
+                    result = mask_np
+
+        # Restore dimensions
+        if squeeze_dim:
+            result = result[np.newaxis, ...]
+
+        # Convert back to torch if needed
+        if is_torch:
+            result = torch.from_numpy(result.astype(np.float32)).to(
+                device=device, dtype=dtype
+            )
+
+        return result
+
+
+class SmoothColonMaskSkeld(Transform):
+    """
+    Dictionary-based version for MONAI pipelines with endpoint protection.
+
+    Args:
+        keys: Keys to apply transform to
+        iterations: Number of dilation/erosion iterations (default: 3)
+        connectivity: Structuring element connectivity (1, 2, or 3)
+        min_neck_thickness: Minimum thickness for connections in voxels (default: 3)
+        min_component_ratio: Minimum component size ratio (default: 0.1)
+        protect_endpoints: Whether to protect colon endpoints (default: True)
+        endpoint_protection_radius: Radius of protection zone (default: 8)
+        data_orientation: Anatomical orientation string (default: "RAS")
+        allow_missing_keys: Don't raise error for missing keys
+    """
+
+    def __init__(
+        self,
+        keys: KeysCollection,
+        iterations: int = 3,
+        connectivity: int = 2,
+        min_neck_thickness: int = 3,
+        min_component_ratio: float = 0.1,
+        protect_endpoints: bool = True,
+        endpoint_protection_radius: int = 8,
+        data_orientation: str = "RAS",
+        allow_missing_keys: bool = False,
+    ):
+        self.keys = keys if isinstance(keys, (list, tuple)) else [keys]
+        self.transform = SmoothColonMaskSkel(
+            iterations=iterations,
+            connectivity=connectivity,
+            min_neck_thickness=min_neck_thickness,
+            min_component_ratio=min_component_ratio,
+            protect_endpoints=protect_endpoints,
+            endpoint_protection_radius=endpoint_protection_radius,
+            data_orientation=data_orientation,
+        )
+        self.allow_missing_keys = allow_missing_keys
+
+    def __call__(self, data: dict) -> dict:
+        """Apply transform to dictionary"""
+        d = dict(data)
+        for key in self.keys:
+            if key in d:
+                d[key] = self.transform(d[key])
+            elif not self.allow_missing_keys:
+                raise KeyError(f"Key '{key}' not found in data")
+        return d

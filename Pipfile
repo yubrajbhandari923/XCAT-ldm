@@ -30,6 +30,9 @@ dukediffseg = {file = ".", editable = true}
 einops = "*"
 crisper = "*"
 cripser = "*"
+connected-components-3d = "*"
+cucim = "*"
+gudhi = "*"
 
 [dev-packages]
 dukediffseg = {file = ".", editable = true}

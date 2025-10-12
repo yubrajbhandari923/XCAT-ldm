@@ -416,12 +416,8 @@ def plot_image_label_pred(title, image, label, pred):
     fig.tight_layout()
     
     return fig
-    # # Save the plot to a file
-    # plot_path = f"image_label_pred_{title}.png" if title else "image_label_pred.png"
-    # plot_path = os.path.join(
-    #     "/home/yb107/cvpr2025/DukeDiffSeg/outputs/medsegdiff/images", plot_path
-    # )
-    # plt.savefig(plot_path)
+
+
 
 
 def get_slices_fig(img_data, img_name, n_every, volume=None, unique_values=None):

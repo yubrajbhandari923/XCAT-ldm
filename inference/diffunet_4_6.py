@@ -1,0 +1,1 @@
+/home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-colon/4.6/train_script.py

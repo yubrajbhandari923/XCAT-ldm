@@ -1,0 +1,134 @@
+# Main Hydra config for 2-stage LDM (AE+GAN ➜ latent diffusion)
+# Cleaned to avoid duplication and mismatch between config and code.
+
+# =========================
+# Experiment meta
+# =========================
+experiment:
+  name: DiffInpaint
+  version: 2.0
+  description: "Simple Diffusion with conditions concatnated as input channels as binary masks"
+  tags: ["DiffInpaint", "colon"]
+  debug: false
+  hash: null
+
+seed: 42
+
+logging:
+  use_aim: true                  # will be used only if utils exist
+  # aim_repo: "/home/yb107/cvpr2025/DukeDiffSeg/aim/"
+  aim_repo: "/home/yb107/cvpr2025/aim_repo/dukediffseg/aim/"
+
+data:
+  description: "Mixed Mobina Colon Data (full 96^3 volumes)"
+  num_classes: 13                 # background + 12 organs (original label space)
+  condition_labels: [3,4,5,6,7,8,9,10,11,12]  # colon + small bowel
+  use_spacing_maps: false
+  spacing_channels: 3             # (dx, dy, dz)
+  orientation: "RAS"
+  pixdim: [1.5, 1.5, 2.0]
+  roi_size: [96, 96, 96]
+  # roi_size: [128, 128, 128]
+  slice_axis: -1
+
+  # cache_dir: "/data/usr/yb107/colon_data/cache_mobina_mixed_colon_dataset_x128"
+  cache_dir: "/data/usr/yb107/colon_data/cache_mobina_mixed_colon_dataset"
+
+  train_jsonl: "/home/yb107/cvpr2025/DukeDiffSeg/data/mobina_mixed_colon_dataset/mobina_mixed_colon_train.jsonl"
+  val_jsonl:   "/home/yb107/cvpr2025/DukeDiffSeg/data/mobina_mixed_colon_dataset/mobina_mixed_colon_val.jsonl"
+
+  batch_size_per_gpu: 1
+  num_workers_per_gpu: 4
+  val_batch_size: 1
+  val_num_workers: 4
+  shuffle_train_data: true
+  save_data: false
+
+
+model:
+  name: "DiffInPaint"
+  params:
+    in_channels:  4 # Overridden 10 organs + 1 background
+    out_channels: 2 # Overridden 3 organs + 1 background
+    channels: [32, 64, 128, 256, 512]
+    attn_levels: [false, false, false, false, false]
+    num_res_blocks: 2
+    num_head_channels: 8
+    crossattn_dim: null
+
+  diffusion:
+    num_train_steps: 1000
+    cfg_scale: 1.0
+    ddim_eta: 0.0
+    prediction_type: "sample"  # "epsilon" or "x0"
+
+
+task: "colon"
+
+constraint: "binary"
+  
+
+# =========================
+# Training runtime
+# =========================
+training:
+  inference_mode: false
+  
+  epochs: 500
+  device: "cuda"
+  save_dir: "/home/yb107/cvpr2025/DukeDiffSeg/outputs"
+  save_interval: 5
+  start_epoch: null
+  num_gpus: 1
+  save_config_yaml: true
+  accumulate_grad_steps: 1
+
+  resume: 
+    path: null
+    restore_optimizer: true
+    restore_scheduler: true
+    restore_ema: true
+
+# =========================
+# Exponential moving average (EMA)
+# =========================
+ema:
+  enable: true
+  rate: 0.9999
+
+
+# =========================
+# LR Scheduler (applied to Stage-2 trainer)
+# =========================
+lr_scheduler:
+  name: "LinearWarmupCosineAnnealingLR"
+  warmup_epochs: 50
+  max_epochs: 300
+
+# =========================
+# Evaluation & visualization
+# =========================
+evaluation:
+  validation_interval: 10
+  validation_max_num_samples: 40
+  metrics: ["Mean Dice"]
+  early_stopping:
+    enabled: false
+    patience: 20
+  visualize: true
+  visualize_every_iter: 2
+
+  save_outputs:
+    enabled: false                # dump inputs/outputs during validation
+    dir: ${training.save_dir}/val_outputs
+    save_inputs: true             # also save ground truth label
+    pred_postfix: "pred"
+    label_postfix: "label"
+    input_postfix: "input"
+
+# =========================
+# AMP
+# =========================
+amp:
+  enabled: false
+  fp16_scale_growth: 1e-3

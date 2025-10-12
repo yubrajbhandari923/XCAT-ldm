@@ -6,8 +6,8 @@
 # =========================
 experiment:
   name: LDM
-  version: 1.1
-  description: "AE only Stage 1 loss hausdorff"
+  version: 2.0
+  description: "AE stage1 train with Recon+Perceptual+GAN loss to retain high and low frequencies"
   tags: ["LDM", "colon+small_bowel"]
   debug: false
   hash: null
@@ -24,11 +24,13 @@ logging:
 data:
   description: "Mixed Mobina Colon Data (full 96^3 volumes)"
   num_classes: 13                 # background + 12 organs (original label space)
+  condition_labels: [3,4,5,6,7,8,9,10,11,12]  # colon + small bowel
   use_spacing_maps: false
   spacing_channels: 3             # (dx, dy, dz)
   orientation: "RAS"
   pixdim: [1.5, 1.5, 2.0]
-  roi_size: [96, 96, 96]
+  # roi_size: [96, 96, 96]
+  roi_size: [128, 128, 128]
   slice_axis: -1
 
   cache_dir: "/data/usr/yb107/colon_data/cache_mobina_mixed_colon_dataset"
@@ -81,7 +83,7 @@ stage1:
   attn_levels: [false, false, true, true, true]
   ae_channels: [32, 64, 128, 256, 512]     # encoder/decoder feature widths
 
-  adversarial_train: false
+  adversarial_train: true
   disc_type: "patch"             # "patch" -> PatchDiscriminator; "full" -> Discriminator
   disc_layers: 3
   disc_channels: 64
@@ -116,9 +118,9 @@ stage2:
 
   # UNet backbone (latent space)
   num_res_blocks: 1
-  channels: [32, 64, 64]
-  attn_levels: [false, true, true]
-  num_head_channels: [0, 64, 64]
+  channels: [64, 128, 256]  # UNet feature widths
+  attn_levels: [false, true, true]  # attention at each level
+  num_head_channels: [0, 64, 64]  # attention head channels
 
   # Conditioner (cross-attention tokens)
   ctx_dim: 256
@@ -127,7 +129,7 @@ stage2:
   # Classifier-free guidance
   p_uncond: 0.1                   # train-time drop prob
   guidance_scale: 3.0             # infer-time CFG scale
-  eval_num_steps: 250             # denoising steps at validation (<= num_train_timesteps)
+  eval_num_steps: 100             # denoising steps at validation (<= num_train_timesteps)
 
   resume:
     path: null         # "auto" or explicit .pt path
@@ -180,6 +182,15 @@ evaluation:
     patience: 20
   visualize: true
   visualize_every_iter: 1
+  
+  stage1:
+    validation_only: false          # run only the Stage 1 evaluator (no training)
+    save_outputs:
+      enabled: false                # dump inputs/outputs during validation
+      dir: ${training.save_dir}/stage1_val_outputs
+      save_inputs: true             # also save ground truth label
+      pred_postfix: "stage1_pred"
+      label_postfix: "stage1_label"
 
 # =========================
 # AMP

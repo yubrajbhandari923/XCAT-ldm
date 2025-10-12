@@ -18,8 +18,8 @@ fi
 
 
 # Launch in new process group with setsid
-pipenv run bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 OMP_NUM_THREADS=8 setsid nohup python -m inference.diffunet_2_0 \
-  training.num_gpus=8 \
+pipenv run bash -c "CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=8 setsid nohup python -m inference.diffunet_2_0 \
+  training.num_gpus=1 \
   training.inference_mode=True \
   training.save_config_yaml=False \
   hydra.job.chdir=False \
@@ -30,7 +30,7 @@ pipenv run bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 OMP_NUM_THREADS=8 setsi
   model.params.use_spacing_info=True \
   training.start_epoch=1103 \
   training.resume=/home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet_v2-multi_class-colon_bowel/3.2/checkpoints/DiffUNet_v2-multi_class-colon_bowel_latest_checkpoint_1103.pt \
-  data.save_data=False \
+  data.save_data=True \
   data.val_jsonl=/home/yb107/cvpr2025/DukeDiffSeg/data/c_grade_colons/3d_vlsmv2_c_grade_colon_dataset.jsonl \
   data.cache_dir=/data/usr/yb107/colon_data/cache_tmp \
   > $LOGFILE 2>&1 & echo \$! > $PIDFILE"

@@ -30,7 +30,6 @@ import torch.optim as optim
 from torch.amp import GradScaler
 from torch.optim.swa_utils import AveragedModel
 from ignite.utils import setup_logger
-from torch.nn.parallel import DistributedDataParallel, DataParallel
 
 
 from ignite.engine import Events
@@ -45,12 +44,12 @@ from monai import transforms
 from monai.data import list_data_collate
 from monai.handlers import MeanDice, StatsHandler
 from monai.handlers.utils import from_engine, stopping_fn_from_metric
-from monai.inferers import LatentDiffusionInferer, DiffusionInferer
+from monai.inferers import LatentDiffusionInferer
 from monai.losses.dice import DiceLoss, DiceCELoss
 from monai.engines.utils import IterationEvents
 from monai.networks.nets import AutoencoderKL, Discriminator, PatchDiscriminator
 from monai.networks.nets import DiffusionModelUNet
-from monai.networks.schedulers import DDPMScheduler, DDIMScheduler
+from monai.networks.schedulers import DDPMScheduler
 from monai.engines import SupervisedTrainer
 from monai.utils import set_determinism, AdversarialIterationEvents, AdversarialKeys
 from monai.utils.enums import CommonKeys as Keys
@@ -105,7 +104,7 @@ def get_aim_logger(config):
         aim_logger.experiment.add_tag("Inference")
     else:
         aim_logger.experiment.add_tag("Train")
-        
+
     for tag in config.experiment.tags:
         aim_logger.experiment.add_tag(tag)
 
@@ -122,20 +121,18 @@ def get_aim_logger(config):
     with open(script_path, "r") as script_file:
         script_content = script_file.read()
     aim_logger.experiment.log_info(script_content)
-    
 
     # Save the updated config to a file for easy recreation
     if config.training.save_config_yaml:
         # create dir if not exists
         if not os.path.exists(config.training.save_dir):
             os.makedirs(config.training.save_dir, exist_ok=True)
-            
+
         with open(
             os.path.join(config.training.save_dir, "config.yaml"),
             "w",
         ) as f:
             OmegaConf.save(config=config, f=f)
-            
         with open(
             os.path.join(config.training.save_dir, "train_script.py"),
             "w",
@@ -1080,33 +1077,7 @@ def build_stage1_evaluator(cfg, autoencoder, val_loader, device):
 # ---------------------------
 # Stage 2: Build (UNet + conditioner + scheduler + trainer)
 # ---------------------------
-class ConditionedUNetWrapper(nn.Module):
-    """Tiny module that forwards conditioning to the underlying UNet."""
-    def __init__(self, unet):
-        super().__init__()
-        self.unet = unet  # this is already auto_model()'d / possibly DDP-wrapped
-        self.ctx = None
-        self.mode = "crossattn"
-
-    def forward(self, x, timesteps):
-        if self.ctx is None:
-            return self.unet(x, timesteps)
-        return self.unet(x, timesteps, conditioning=self.ctx, mode=self.mode)
-
-def unwrap(m): 
-    return m.module if isinstance(m, (DistributedDataParallel, DataParallel)) else m
-
-
-def pad_to_multiple(x, m=4):
-    B,C,H,W,D = x.shape
-    tH = ((H + m - 1)//m)*m
-    tW = ((W + m - 1)//m)*m
-    tD = ((D + m - 1)//m)*m
-    pad = (0, tD-D, 0, tW-W, 0, tH-H)  # (D_left,D_right,W_left,W_right,H_left,H_right)
-    return torch.nn.functional.pad(x, pad, mode="replicate"), pad
-
-
-def build_stage2(cfg, rank: int, autoencoder: AutoencoderKL, cond_in_channels: int, train_loader=None):
+def build_stage2(cfg, rank: int, autoencoder: AutoencoderKL, cond_in_channels: int):
     unet = DiffusionModelUNet(
         spatial_dims=3,
         in_channels=int(cfg.stage1.latent_channels),
@@ -1116,8 +1087,6 @@ def build_stage2(cfg, rank: int, autoencoder: AutoencoderKL, cond_in_channels: i
         attention_levels=tuple(cfg.stage2.attn_levels),
         num_head_channels=tuple(cfg.stage2.num_head_channels),
         with_conditioning=True,
-        cross_attention_dim= int(cfg.stage2.ctx_dim),
-        # norm_num_groups=16,
     )
 
     scheduler = DDPMScheduler(
@@ -1133,8 +1102,7 @@ def build_stage2(cfg, rank: int, autoencoder: AutoencoderKL, cond_in_channels: i
         num_tokens=int(cfg.stage2.num_ctx_tokens),
     )
 
-    # inferer = LatentDiffusionInferer(scheduler=scheduler, scale_factor=float(cfg.stage2.scale_factor))
-    inferer = DiffusionInferer(scheduler=scheduler)
+    inferer = LatentDiffusionInferer(scheduler=scheduler, scale_factor=float(cfg.stage2.scale_factor))
 
     opt = optim.AdamW(
         list(unet.parameters()) + list(conditioner.parameters()),
@@ -1150,43 +1118,34 @@ def build_stage2(cfg, rank: int, autoencoder: AutoencoderKL, cond_in_channels: i
     unet = auto_model(unet)
     conditioner = auto_model(conditioner)
 
-    # unet_wrapper = ConditionedUNetWrapper(unet)
     # Diffusion prepare-batch util: samples noise and time-steps
     # try:
 
     dpb = DiffusionPrepareBatch(num_train_timesteps=int(cfg.stage2.num_train_timesteps))
 
-    autoencoder = unwrap(autoencoder)
-    autoencoder.eval()
-    
-
-
     def ldm_prepare_batch(batch, device=None, non_blocking=True):
-        # produce (or load) latents z here
-        with torch.no_grad():
-            imgs = batch[Keys.LABEL].to(device, non_blocking=non_blocking).float()
-            z = autoencoder.encode_stage_2_inputs(imgs) * float(cfg.stage2.scale_factor)
-            z, pad = pad_to_multiple(z, m=4)
+        target = batch[Keys.LABEL].to(device, non_blocking=non_blocking).float()                      # (B, 2, ...)
+        organs = batch[Keys.IMAGE].to(device, non_blocking=non_blocking).float()                      # (B, C_cond, ...)
+        sp_maps = batch["spacing_maps"].to(device, non_blocking=non_blocking).float()                # (B, 3, ...)
+        cond_img = torch.cat([organs, sp_maps], dim=1)
 
-        cond = batch[Keys.IMAGE].to(device, non_blocking=non_blocking).float()
-        ctx = conditioner(cond)
-        drop = torch.rand((ctx.size(0),), device=ctx.device) < float(cfg.stage2.p_uncond)
-        ctx = torch.where(drop[:, None, None], torch.zeros_like(ctx), ctx)
+        inputs, target_eps, kw = dpb((target, None))  # inputs=target image; target_eps=noise; kw={timesteps, noise}
+        ctx = conditioner(cond_img)
 
-        inputs, target_eps, _, kw = dpb({Keys.IMAGE: z, Keys.LABEL: z}, device=device, non_blocking=non_blocking)
-        args = ()  # network will be the UNet
-        kwargs = dict(noise=kw["noise"], timesteps=kw["timesteps"], condition=ctx, mode="crossattn")
+        # classifier-free guidance: randomly drop condition
+        drop = torch.rand((ctx.shape[0],), device=ctx.device) < float(cfg.stage2.p_uncond)
+        ctx = torch.where(drop.view(-1, 1, 1), torch.zeros_like(ctx), ctx)
 
-        return inputs, target_eps, args, kwargs
-
+        kw.update(dict(conditioning=ctx, mode="crossattn"))
+        return inputs.to(device), target_eps.to(device), kw
 
     from monai.engines import SupervisedTrainer
 
     trainer = SupervisedTrainer(
         device=idist.device(),
         max_epochs=int(cfg.stage2.epochs),
-        train_data_loader=train_loader,  # set later
-        network=unet,  # Use the UNet as the network
+        train_data_loader=None,
+        network=unet,
         optimizer=opt,
         loss_function=loss_fn,
         prepare_batch=ldm_prepare_batch,
@@ -1195,14 +1154,14 @@ def build_stage2(cfg, rank: int, autoencoder: AutoencoderKL, cond_in_channels: i
     )
 
     # Freeze AE for stage2 and stash references for evaluation/sampling
-
     for p in autoencoder.parameters():
         p.requires_grad = False
     trainer.autoencoder = autoencoder.eval()
     trainer.conditioner = conditioner
     trainer.scheduler = scheduler
 
-    return unet, conditioner, scheduler, inferer, trainer, opt
+    return unet, conditioner, scheduler, inferer, trainer
+
 
 # ---------------------------
 # Helper: latent shape probe & decoding
@@ -1220,96 +1179,19 @@ def _get_latent_shape(ae: AutoencoderKL, target_masks: torch.Tensor, spacing_map
     return (B, latent_channels, H // f, W // f, D // f)
 
 
-def get_shapes_and_pad(ae, target, scale_factor, m=4):
-    with torch.no_grad():
-        z0 = ae.encode_stage_2_inputs(target) * scale_factor          # (B,C,h,w,d) = e.g., 6x6x6
-        z_pad, pad = pad_to_multiple(z0, m=m)                          # (0,pD, 0,pW, 0,pH)
-    return z0.shape, z_pad.shape, pad
-
-
-def unpad_to_shape(
-    x, orig_shape, pad
-):  # pad = (0,pD,0,pW,0,pH), we only padded on the right
-    _, _, H0, W0, D0 = orig_shape
-    return x[:, :, :H0, :W0, :D0]
-
-
-def center_crop_to(x, size_hwD):
-    Ht, Wt, Dt = size_hwD
-    B, C, H, W, D = x.shape
-    sh = (H - Ht) // 2
-    sw = (W - Wt) // 2
-    sd = (D - Dt) // 2
-    return x[:, :, sh : sh + Ht, sw : sw + Wt, sd : sd + Dt]
-
-
-def _cfg_sample_latents(unet, conditioner, scheduler, cond_img, latent_shape, guidance_scale: float, steps: int, device: torch.device, step_kwargs=None):
+def _cfg_sample_latents(unet, conditioner, scheduler, cond_img, latent_shape, guidance_scale: float, steps: int, device: torch.device):
     ctx = conditioner(cond_img)
     ctx0 = torch.zeros_like(ctx)
-    step_kwargs = step_kwargs or {} 
+
     scheduler.set_timesteps(steps)
     z = torch.randn(latent_shape, device=device)
 
     for t in scheduler.timesteps:
-        eps_c = unet(z, t, context=ctx)
-        eps_u = unet(z, t, context=ctx0)
+        eps_c = unet(z, t, conditioning=ctx, mode="crossattn")
+        eps_u = unet(z, t, conditioning=ctx0, mode="crossattn")
         eps = eps_u + guidance_scale * (eps_c - eps_u)
-
-        out = scheduler.step(model_output=eps, timestep=t, sample=z, **step_kwargs)
-        # z = getattr(out, "prev_sample", out)  # handle namedtuple or plain tensor
-        z =  out[0] if isinstance(out, (tuple, list)) else out
+        z = scheduler.step(model_output=eps, timestep=t, sample=z).prev_sample
     return z
-
-
-@torch.no_grad()
-def ddim_sample_cfg(
-    unet,
-    scheduler,
-    noise: torch.Tensor,  # shape = latent_shape (after padding)
-    steps: int,
-    conditioning: torch.Tensor | None = None,  # [B, N_ctx, D] for crossattn
-    cfg: float = 0.0,
-    eta: float = 0.0,
-    mode: str = "crossattn",
-):
-    device = noise.device
-    scheduler.set_timesteps(steps)
-    z = noise
-    ctx = conditioning
-    ctx0 = torch.zeros_like(ctx) if ctx is not None else None
-
-    for t in scheduler.timesteps:
-        if ctx is not None and cfg != 0.0:
-            # vectorized 2x batch for eps_c / eps_u
-            z_in = torch.cat([z, z], dim=0)
-            t_in = torch.full(
-                (z_in.size(0),), t, device=device, dtype=scheduler.timesteps.dtype
-            )
-            ctx_in = torch.cat([ctx, ctx0], dim=0)
-            eps_c, eps_u = unet(z_in, t_in, context=ctx_in).chunk(2, dim=0)
-            eps = eps_u + cfg * (eps_c - eps_u)
-        else:
-            t_in = torch.full(
-                (z.size(0),), t, device=device, dtype=scheduler.timesteps.dtype
-            )
-            eps = unet(z, t_in, context=ctx)
-
-        out = scheduler.step(model_output=eps, timestep=t, sample=z, eta=eta)
-        z = (
-            out[0]
-            if isinstance(out, (tuple, list))
-            else getattr(out, "prev_sample", out)
-        )
-    return z
-
-class DiffusionInfererCFG(DiffusionInferer):
-    @torch.no_grad()
-    def sample_cfg(self, input_noise, diffusion_model, scheduler=None,
-                   conditioning=None, mode="crossattn", cfg=0.0, eta=0.0):
-        if scheduler is None: scheduler = self.scheduler
-        return ddim_sample_cfg(diffusion_model, scheduler, input_noise,
-                               steps=len(scheduler.timesteps),
-                               conditioning=conditioning, cfg=cfg, eta=eta, mode=mode)
 
 
 def _ae_decode_masks(autoencoder: AutoencoderKL, latents: torch.Tensor, target_channels: int):
@@ -1329,7 +1211,6 @@ def build_stage2_evaluator(cfg, unet, conditioner, autoencoder, scheduler, val_l
     target_ch = int(cfg.stage1.target_channels)
     guidance_scale = float(cfg.stage2.guidance_scale)
     num_steps = int(cfg.stage2.eval_num_steps)
-    scale_factor = float(cfg.stage2.scale_factor)
 
     post = transforms.Compose([
         transforms.Lambdad(keys=Keys.PRED, func=lambda x: torch.sigmoid(x)),
@@ -1345,48 +1226,26 @@ def build_stage2_evaluator(cfg, unet, conditioner, autoencoder, scheduler, val_l
         )
     }
 
-    ddim_eta = float(getattr(cfg.stage2, "ddim_eta", 0.0))  # 0.0 = deterministic DDIM
-    ddim_scheduler = DDIMScheduler(
-        num_train_timesteps=int(cfg.stage2.num_train_timesteps),
-        schedule=str(cfg.stage2.beta_schedule),
-        beta_start=float(cfg.stage2.beta_start),
-        beta_end=float(cfg.stage2.beta_end),
-    )
-    # eval_inferer = DiffusionInferer(scheduler=ddim_scheduler)
-    eval_inferer = DiffusionInfererCFG(scheduler=ddim_scheduler)
-
     from monai.engines import Evaluator
-    autoencoder = unwrap(autoencoder)
-    autoencoder.eval()
 
     def eval_step(engine, batch):
         organs = batch[Keys.IMAGE].to(device).float()
         target = batch[Keys.LABEL].to(device).float()
-        # sp = batch["spacing_maps"].to(device).float()
-        # cond_img = torch.cat([organs, sp], dim=1)
-        cond_img = organs  # no spacing maps in eval
+        sp = batch["spacing_maps"].to(device).float()
+        cond_img = torch.cat([organs, sp], dim=1)
 
-        # latent_shape = _get_latent_shape(autoencoder, target, sp, int(cfg.stage1.latent_channels))
-        z0_shape, z_shape, pad = get_shapes_and_pad(
-            unwrap(autoencoder).eval(), target, float(cfg.stage2.scale_factor), m=4
+        latent_shape = _get_latent_shape(autoencoder, target, sp, int(cfg.stage1.latent_channels))
+        latents = _cfg_sample_latents(
+            unet=unet.eval(),
+            conditioner=conditioner.eval(),
+            scheduler=scheduler,
+            cond_img=cond_img,
+            latent_shape=latent_shape,
+            guidance_scale=guidance_scale,
+            steps=num_steps,
+            device=device,
         )
-        ddim_scheduler.set_timesteps(int(cfg.stage2.eval_num_steps))
-
-        noise = torch.randn(z_shape, device=device)
-        ctx = conditioner(organs)
-        z_hat_pad = eval_inferer.sample_cfg(
-            noise,
-            unet,
-            scheduler=ddim_scheduler,
-            conditioning=ctx,
-            mode="crossattn",
-            cfg=cfg.stage2.guidance_scale,
-            eta=ddim_eta,
-        )
-        z_hat = unpad_to_shape(z_hat_pad, z0_shape, pad)                      # remove the padded rim
-
-        logits = _ae_decode_masks(unwrap(autoencoder).eval(), z_hat, target_channels=int(cfg.stage1.target_channels))
-        # (optionally clip/crop if needed)
+        logits = _ae_decode_masks(autoencoder.eval(), latents, target_channels=target_ch)
         engine.state.output = {Keys.IMAGE: organs, Keys.LABEL: target, Keys.PRED: logits}
         return engine.state.output
 
@@ -1431,7 +1290,6 @@ def _latest_ckpt_path(save_dir: str, stage_name: str, prefix: Optional[str] = No
     candidates.sort(key=os.path.getmtime, reverse=True)
     return candidates[0]
 
-
 def _align_module_prefix(sd: Dict[str, Any], target_keys) -> Dict[str, Any]:
     # only touch real model state dicts (string keys with .weight/.bias, etc.)
     if not sd or not isinstance(sd, dict):
@@ -1441,17 +1299,13 @@ def _align_module_prefix(sd: Dict[str, Any], target_keys) -> Dict[str, Any]:
         return sd
 
     tgt_has_module = any(k.startswith("module.") for k in target_keys)
-    sd_has_module = any(k.startswith("module.") for k in str_keys)
+    sd_has_module  = any(k.startswith("module.") for k in str_keys)
 
     if tgt_has_module and not sd_has_module:
         return {f"module.{k}": v for k, v in sd.items()}
     if not tgt_has_module and sd_has_module:
-        return {
-            k[len("module.") :] if k.startswith("module.") else k: v
-            for k, v in sd.items()
-        }
+        return {k[len("module."):] if k.startswith("module.") else k: v for k, v in sd.items()}
     return sd
-
 
 def _load_one(obj: Any, state: Dict[str, Any], strict: bool):
     if obj is None or state is None:
@@ -1681,7 +1535,7 @@ def attach_stage1_val_saver(evaluator, cfg):
         if bool(so.save_inputs)
         else None
     )
-
+    
     @evaluator.on(Events.ITERATION_COMPLETED)
     def _save_batch(engine):
         """
@@ -1722,21 +1576,15 @@ def attach_aim_handlers(trainer, val_evaluator, aim_logger, rank: int, cfg, stag
         ] if bool(cfg.stage1.adversarial_train) else [
             (trainer, Events.ITERATION_COMPLETED, "Iter Loss", Keys.LOSS),
             (trainer, Events.EPOCH_COMPLETED, "Epoch Loss", Keys.LOSS),
-        ],
-        "stage2": [
-            (trainer, Events.ITERATION_COMPLETED, "Iter Loss", Keys.LOSS),
-            (trainer, Events.EPOCH_COMPLETED, "Epoch Loss", Keys.LOSS),
-        ],
+        ]
     }
     
-    for stg_name, log_items in aim_logs.items():
-        if stg_name != stage_name:
-            continue
+    for stage_name, log_items in aim_logs.items():
         for eng, event, tag, key in log_items:
             aim_logger.attach_output_handler(
                 eng,
                 event_name=event,
-                tag=f"{stg_name} {tag}",
+                tag=f"{stage_name} {tag}",
                 output_transform=from_engine([key], first=True),
                 global_step_transform=global_step_from_engine(trainer),
             )
@@ -1843,9 +1691,6 @@ def _distributed_run(rank: int, cfg):
 
     # Stage 1
     if bool(cfg.pipeline.train_stage1):
-        if rank == 0:
-            logging.info(f"[Rank {rank}] >>> Stage 1 training enabled")
-            
         if cfg.stage1.adversarial_train:
             ae, disc, ae_trainer, g_opt, d_opt = build_stage1(cfg, rank)
         else:
@@ -1902,25 +1747,16 @@ def _distributed_run(rank: int, cfg):
         ae.eval()
     else:
         # Load a pretrained AE if specified
-        # ae = AutoencoderKL(spatial_dims=3, in_channels=5, out_channels=5, channels=tuple(cfg.stage1.ae_channels), latent_channels=int(cfg.stage1.latent_channels), num_res_blocks=1, norm_num_groups=16, attention_levels=tuple(cfg.stage1.attn_levels))
-        ae, disc, ae_trainer, g_opt, d_opt = build_stage1_only_ae(cfg, rank, train_loader)
-        # if cfg.stage1.pretrained_path:
-        #     sd = torch.load(cfg.stage1.pretrained_path, map_location=device)
-        #     ae.load_state_dict(sd)
-        stage1_savables = {"autoencoder": ae}
-        resumed = resume_from_checkpoint(
-            stage_name="stage1", config=cfg, to_load=stage1_savables, rank=rank
-        )
+        ae = AutoencoderKL(spatial_dims=3, in_channels=5, out_channels=5, channels=tuple(cfg.stage1.ae_channels), latent_channels=int(cfg.stage1.latent_channels), num_res_blocks=1, norm_num_groups=16, attention_levels=tuple(cfg.stage1.attn_levels))
+        if cfg.stage1.pretrained_path:
+            sd = torch.load(cfg.stage1.pretrained_path, map_location=device)
+            ae.load_state_dict(sd)
         ae.eval()
-        logging.info(f"[Rank {rank}] >>> Stage 1 resumed from checkpoint")
 
     # Stage 2
     if bool(cfg.pipeline.train_stage2):
-        if rank == 0:
-            logging.info(f"[Rank {rank}] >>> Stage 2 training enabled")
-        # cond_ch = len(cfg.data.condition_labels) + (int(cfg.data.spacing_channels) if bool(cfg.data.use_spacing_maps) else 0)
-        cond_ch = cfg.model.params.in_channels + (int(cfg.data.spacing_channels) if bool(cfg.data.use_spacing_maps) else 0)
-        unet, conditioner, scheduler, inferer, dm_trainer, optimizer = build_stage2(cfg, rank, ae, cond_ch, train_loader=train_loader)
+        cond_ch = len(cfg.data.condition_labels) + (int(cfg.data.spacing_channels) if bool(cfg.data.use_spacing_maps) else 0)
+        unet, conditioner, scheduler, inferer, dm_trainer = build_stage2(cfg, rank, ae, cond_ch)
         dm_trainer.data_loader = train_loader
 
         # LR scheduler for Stage 2
@@ -1937,7 +1773,7 @@ def _distributed_run(rank: int, cfg):
         attach_handlers(
             trainer=dm_trainer,
             val_evaluator=stage2_val,
-            objects_to_save={"unet": unet, "conditioner": conditioner, "ema_model": ema_model_stage2, "trainer": dm_trainer, "lr_scheduler": getattr(dm_trainer, "lr_scheduler", None), "scaler": getattr(dm_trainer, "scaler_", None), "optimizer": optimizer},
+            objects_to_save={"unet": unet, "conditioner": conditioner},
             cfg=cfg,
             aim_logger=aim_logger,
             rank=rank,

@@ -1,3 +1,0 @@
-Patient_00552_Study_84140_Series_03.nii.gz,torch.Size([1, 247, 194, 490])
-Patient_02114_Study_82087_Series_03.nii.gz,torch.Size([1, 236, 188, 507])
-Patient_00129_Study_62661_Series_04.nii.gz,torch.Size([1, 314, 203, 489])

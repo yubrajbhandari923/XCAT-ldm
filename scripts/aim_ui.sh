@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+!/usr/bin/env bash
 #
 # Simple wrapper to start/stop the Aim experiment-tracking UI.
 # -----------------------------------------------------------------
@@ -13,7 +13,8 @@
 set -euo pipefail
 
 # ----------------------------- defaults --------------------------
-AIM_REPO="/home/yb107/cvpr2025/DukeDiffSeg"
+# AIM_REPO="/home/yb107/cvpr2025/DukeDiffSeg"
+AIM_REPO="/home/yb107/cvpr2025/aim_repo/dukediffseg"
 AIM_PORT=43800
 ACTION=""
 # -----------------------------------------------------------------
