@@ -53,9 +53,10 @@ def _align_module_prefix(sd: Dict[str, Any], target_keys) -> Dict[str, Any]:
     return sd
 
 
-def _load_one(obj: Any, state: Dict[str, Any], strict: bool):
+def _load_one(obj: Any, state: Dict[str, Any], strict: bool, name: str = ""):
     """Load state into obj if possible, with some heuristics."""
     if obj is None or state is None:
+        logging.warning(f"Resume: skipping loading into {name}")
         return
     try:
         if hasattr(obj, "load_state_dict"):
@@ -72,6 +73,7 @@ def _load_one(obj: Any, state: Dict[str, Any], strict: bool):
                     obj.load_state_dict(state, strict=strict)
                 except TypeError:
                     obj.load_state_dict(state)
+            logging.info(f"Resume: loaded state into {type(obj).__name__} {name}")
         else:
             raise AttributeError
     except Exception as e:
@@ -115,22 +117,24 @@ def resume_from_checkpoint(
     bundle = torch.load(ckpt_path, map_location=idist.device())
 
     # Always try to load networks and trainer first
-    _load_one(to_load.get("trainer"), bundle.get("trainer"), strict=False)
+    _load_one(to_load.get("trainer"), bundle.get("trainer"), strict=False, name="trainer")
     _load_one(
         to_load.get("autoencoder"),
         bundle.get("autoencoder"),
         strict=getattr(rcfg, "strict", True),
+        name="autoencoder"  
     )
     _load_one(
-        to_load.get("unet"), bundle.get("unet"), strict=getattr(rcfg, "strict", True)
+        to_load.get("unet"), bundle.get("unet"), strict=getattr(rcfg, "strict", True), name="unet"
     )
     _load_one(
-        to_load.get("model"), bundle.get("model"), strict=getattr(rcfg, "strict", True)
+        to_load.get("model"), bundle.get("model"), strict=getattr(rcfg, "strict", True), name="model"
     )
     _load_one(
         to_load.get("conditioner"),
         bundle.get("conditioner"),
         strict=getattr(rcfg, "strict", True),
+        name="conditioner"
     )
     
     if getattr(rcfg, "restore_discriminator", False):
@@ -138,21 +142,25 @@ def resume_from_checkpoint(
             to_load.get("discriminator"),
             bundle.get("discriminator"),
             strict=getattr(rcfg, "strict", True),
+            name="discriminator"
         )
         _load_one(
-            to_load.get("d_optimizer"), bundle.get("d_optimizer"), strict=False
+            to_load.get("d_optimizer"), bundle.get("d_optimizer"), strict=False, name="d_optimizer"
         )
 
     # Optionals per flags
     if getattr(rcfg, "restore_optimizer", True):
         for k in ("g_optimizer", "optimizer"):
-            _load_one(to_load.get(k), bundle.get(k), strict=False)
+            _load_one(to_load.get(k), bundle.get(k), strict=False, name=k)
     if getattr(rcfg, "restore_scheduler", True):
-        _load_one(to_load.get("lr_scheduler"), bundle.get("lr_scheduler"), strict=False)
+        _load_one(to_load.get("lr_scheduler"), bundle.get("lr_scheduler"), strict=False, name="lr_scheduler")
     if getattr(rcfg, "restore_ema", False):
-        _load_one(to_load.get("ema_model"), bundle.get("ema_model"), strict=False)
+        _load_one(to_load.get("ema_model"), bundle.get("ema_model"), strict=False, name="ema_model")
     # Grad scaler if present (AMP)
-    _load_one(to_load.get("scaler"), bundle.get("scaler"), strict=False)
+    _load_one(to_load.get("scaler"), bundle.get("scaler"), strict=False, name="scaler")
+    _load_one(
+        to_load.get("vol_embed_net"), bundle.get("vol_embed_net"), strict=False, name="vol_embed_net"
+    )
 
     # Log where we are
     tr = to_load.get("trainer")

@@ -57,7 +57,7 @@ def attach_checkpoint_handler(
         Events.EPOCH_COMPLETED(every=1), latest_ckpt, _maybe(objects_to_save)
     )
 
-    if val_evaluator is not None and metric_name:
+    if val_evaluator is not None and metric_name and cfg.evaluation.save_checkpoints:
         best_metric_ckpt = ModelCheckpoint(
             dirname=ckpt_dir,
             filename_prefix=f"{cfg.experiment.name}_{stage_name}_best",
@@ -169,9 +169,7 @@ def attach_early_stopping(
 
 
 def attach_inference_saver(evaluator, cfg):
-    so = getattr(cfg.evaluation, "save_outputs", None)
-    if not (so and bool(so.enabled)):
-        return
+    so = cfg.evaluation.save_outputs
 
     outdir = str(so.dir)
     if getattr(so, "dir_postfix", None):
@@ -187,6 +185,13 @@ def attach_inference_saver(evaluator, cfg):
         logging.info(f"Saved config yaml to: {cfg_outpath}")
 
     # We’ll save predictions using filenames/affines from the LABEL meta
+    pre_save_trans = transforms.Compose(
+        [ # orientation
+            transforms.EnsureTyped(keys=["pred"], track_meta=True),
+            transforms.ToDeviced(keys=["pred"], device="cpu"),
+            transforms.Orientationd(keys=["pred"], axcodes=cfg.data.orientation),
+        ])
+    
     saver_pred = transforms.SaveImaged(
         keys="pred",
         # meta_keys="pred_meta_dict",
@@ -242,6 +247,7 @@ def attach_inference_saver(evaluator, cfg):
         for p, l, img in zip(preds, labels, image):
             # prediction
             d_pred = {"pred": p, "pred_meta_dict": l.meta}
+            d_pred = pre_save_trans(d_pred)
             saver_pred(d_pred)
 
             # optional ground-truth copy
@@ -312,6 +318,14 @@ def attach_aim_handlers(
             metric_names=[metric_name],
             global_step_transform=global_step_from_engine(trainer),
         )
+        # Log per-batch volume differences
+        aim_logger.attach_output_handler(
+            val_evaluator,
+            event_name=Events.ITERATION_COMPLETED,
+            tag="Validation Volume Difference",
+            output_transform=lambda x: x[0]["Predicted Volume Difference"].abs().mean().item(),
+            global_step_transform=global_step_from_engine(trainer),
+        )
 
     # Optional image logging
     if (
@@ -376,6 +390,8 @@ def attach_handlers(
         postprocess,
         metric_name,
     )
+    if cfg.evaluation.save_outputs.enabled:
+        attach_inference_saver(val_evaluator, cfg)
 
     if (
         step_lr
@@ -388,8 +404,5 @@ def attach_handlers(
                 engine.lr_scheduler.step()
 
         trainer.add_event_handler(Events.EPOCH_COMPLETED, _step_lr)
-
-    if cfg.evaluation.save_outputs.enabled:
-        attach_inference_saver(val_evaluator, cfg)
 
     # trainer.add_event_handler(Events.STARTED, lambda e: e.optimizer.zero_grad(set_to_none=True))

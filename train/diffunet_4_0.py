@@ -80,7 +80,7 @@ from utils.data import (
     sdf_to_mask,
     MaskToSDFd
 )
-from utils.monai_transforms import CropForegroundAxisd, SmoothColonMaskSkeld
+from utils.monai_transforms import CropForegroundAxisd, SmoothColonMaskd
 from utils.resume import resume_from_checkpoint
 from utils.handlers import attach_handlers, attach_inference_saver
 from utils.loss import SoftCIDice, topo_loss, largest_component_dice_loss, loss_isoperimetric, eikonal_band_match_gt_vec, surface_area_from_sdf_normalized, volume_from_mask_batched
@@ -1027,12 +1027,12 @@ def get_evaluator(cfg, model, val_loader):
             # transforms.AsDiscreted(keys=Keys.PRED, argmax=True, to_onehot=target_ch),
             # transforms.AsDiscreted(keys=Keys.LABEL, argmax=True, to_onehot=target_ch),
             transforms.Identityd(keys=[Keys.IMAGE, Keys.LABEL, Keys.PRED]),
-            SmoothColonMaskSkeld(
+            SmoothColonMaskd(
                 keys=[Keys.PRED],
-                iterations=6,
+                iterations=10,
                 connectivity=2,
                 min_neck_thickness=0,
-                data_orientation="LPI",
+                data_orientation="RAS",
             )
         ]
     )

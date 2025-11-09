@@ -33,9 +33,11 @@ cripser = "*"
 connected-components-3d = "*"
 cucim = "*"
 gudhi = "*"
+pyarrow = "*"
 
 [dev-packages]
 dukediffseg = {file = ".", editable = true}
+ipykernel = "*"
 
 [requires]
 python_version = "3.10"

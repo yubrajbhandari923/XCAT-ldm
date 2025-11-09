@@ -42,22 +42,46 @@ fi
 # ln -s /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-colon/4.6/train_script.py /home/yb107/cvpr2025/DukeDiffSeg/inference/diffunet_4_6.py
   # data.cache_dir=/data/usr/yb107/colon_data/cache_mobina_mixed_colon_dataset_alll \
 
-pipenv run bash -c "CUDA_VISIBLE_DEVICES=1,2,3,5 OMP_NUM_THREADS=8 setsid nohup python -m train.diffunet_4_0 \
-  training.num_gpus=4 \
+# pipenv run bash -c "CUDA_VISIBLE_DEVICES=1,2,3,5 OMP_NUM_THREADS=8 setsid nohup python -m train.diffunet_4_0 \
+#   training.num_gpus=4 \
+#   training.inference_mode=True \
+#   evaluation.save_outputs.enabled=True \
+#   evaluation.save_outputs.save_inputs=False \
+#   evaluation.save_outputs.dir_postfix=c_grade_550_gs_2.0_final_small_with_skeletonization \
+#   experiment.debug=False \
+#   data.save_data=False \
+#   data.batch_size_per_gpu=1 \
+#   experiment.version=5.1 \
+#   diffusion.guidance_scale=2.0 \
+#   data.val_jsonl=/home/yb107/cvpr2025/DukeDiffSeg/data/c_grade_colons/3d_vlsmv2_c_grade_colon_dataset_with_body_filled_small.jsonl\
+#   training.resume.path=/home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-colon/5.1/checkpoints/training/DiffUnet-binary-colon_training_latest_checkpoint_550.pt \
+#   hydra.run.dir=$LOGDIR \
+#   > $LOGFILE 2>&1 & echo \$! > $PIDFILE"
+
+  # Liver -> gallbladder -> spleen -> kidneys -> stomach -> pancrease -> duodenum -> urinary_bladder -> rectum -> colon -> small_bowel
+
+  # evaluation.save_outputs.dir_postfix=colon_inference_test \
+
+pipenv run bash -c "CUDA_VISIBLE_DEVICES=1,3 OMP_NUM_THREADS=2 setsid nohup python -m train.diffunet_6_1 \
+  training.num_gpus=2 \
   training.inference_mode=True \
   evaluation.save_outputs.enabled=True \
-  evaluation.save_outputs.save_inputs=False \
-  evaluation.save_outputs.dir_postfix=c_grade_550_gs_2.0_final_small_with_skeletonization \
+  evaluation.save_outputs.save_inputs=True \
+  evaluation.save_outputs.dir_postfix=liver_volume_guided \
+  evaluation.save_checkpoints=False \
+  evaluation.validation_interval=10 \
+  diffusion.ddim_steps=20 \
+  task='liver' \
+  liver.resume.path=/home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.6/checkpoints/liver/DiffUnet-binary-iterative_liver_best_checkpoint_1710_MeanDice0.7490.pt\
+  model.adverserial_train.enabled=False \
   experiment.debug=False \
   data.save_data=False \
-  data.batch_size_per_gpu=1 \
-  experiment.version=5.1 \
-  diffusion.guidance_scale=2.0 \
-  data.val_jsonl=/home/yb107/cvpr2025/DukeDiffSeg/data/c_grade_colons/3d_vlsmv2_c_grade_colon_dataset_with_body_filled_small.jsonl\
-  training.resume.path=/home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-colon/5.1/checkpoints/training/DiffUnet-binary-colon_training_latest_checkpoint_550.pt \
+  data.batch_size_per_gpu=4 \
+  data.val_batch_size=1 \
+  data.val_jsonl=/home/yb107/cvpr2025/DukeDiffSeg/data/mobina_mixed_colon_dataset/mobina_mixed_colon_dataset_with_body_filled_val_small.jsonl \
+  hydra.job.chdir=false \
   hydra.run.dir=$LOGDIR \
   > $LOGFILE 2>&1 & echo \$! > $PIDFILE"
-
 
 
 echo "🚀 Inference started — logs: $LOGFILE"

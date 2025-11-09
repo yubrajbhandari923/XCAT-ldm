@@ -6,7 +6,11 @@ import json
 import numpy as np
 from typing import Optional, Sequence
 from monai.transforms.utils import distance_transform_edt as monai_edt
-
+from scipy.ndimage import distance_transform_edt
+from skimage.morphology import skeletonize
+from scipy.spatial import cKDTree
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import shortest_path
 
 def add_spacing(sample: dict) -> dict:
     # grab the affine out of the meta-dict
@@ -52,10 +56,12 @@ def remove_labels(x: torch.Tensor, labels: list, relabel: bool=False) -> torch.T
 def transform_labels(x: torch.Tensor, label_map: dict) -> torch.Tensor:
     """Transform labels in the tensor according to the provided label_map."""
     label_map_items = label_map.items()
-    #sort it with old_labels
+    # sort it with old_labels
     sorted_items = sorted(label_map_items, key=lambda x: x[0])
     for old_label, new_label in sorted_items:
-        x[x == old_label] = new_label
+        mask = x == old_label
+        if mask.any():
+            x[mask] = new_label
     return x
 
 
@@ -72,7 +78,223 @@ def list_from_jsonl(jsonl_path, image_key="image", label_key="label", include_bo
     return files
 
 
-def dataset_depended_transform_labels(x):
+def split_colon_into_3_sections(binary_mask, method="spatial", device="cpu"):
+    """
+    Convert binary colon segmentation mask into 3-channel tensor with separate sections.
+
+    Args:
+        binary_mask: torch.Tensor or np.ndarray of shape [D, H, W] or [H, W, D]
+                     Binary mask with 0=background, 1=colon
+        method: str, either 'spatial' (faster) or 'skeleton' (more accurate)
+        device: str, torch device for output tensor
+
+    Returns:
+        torch.Tensor of shape [3, D, H, W] where:
+            channel 0: proximal section
+            channel 1: middle section
+            channel 2: distal section
+    """
+
+    # Convert to numpy if torch tensor
+    if torch.is_tensor(binary_mask):
+        mask_np = binary_mask.cpu().numpy()
+    else:
+        mask_np = binary_mask
+
+    # Ensure binary
+    mask_np = (mask_np > 0).astype(np.uint8)
+
+    if method == "spatial":
+        three_channel_mask = _split_spatial(mask_np)
+    elif method == "skeleton":
+        three_channel_mask = _split_skeleton(mask_np)
+    else:
+        raise ValueError(f"Method must be 'spatial' or 'skeleton', got {method}")
+
+    # Convert to torch tensor [3, D, H, W]
+    output_tensor = torch.from_numpy(three_channel_mask).float().to(device)
+
+    return output_tensor
+
+
+def _split_spatial(mask_np):
+    """
+    Split mask into 3 sections based on dominant spatial axis (faster method).
+    """
+    # Find colon voxels
+    colon_coords = np.argwhere(mask_np > 0)
+
+    if len(colon_coords) == 0:
+        # Empty mask, return empty 3-channel
+        return np.zeros((3, *mask_np.shape), dtype=np.float32)
+
+    # Find principal axis using PCA
+    centered = colon_coords - colon_coords.mean(axis=0)
+    cov_matrix = np.cov(centered.T)
+    eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
+    principal_axis = eigenvectors[:, np.argmax(eigenvalues)]
+
+    # Project coordinates onto principal axis
+    projections = colon_coords @ principal_axis
+
+    # Divide into thirds based on projection values
+    percentile_33 = np.percentile(projections, 33.33)
+    percentile_66 = np.percentile(projections, 66.67)
+
+    # Create 3-channel output
+    three_channel = np.zeros((3, *mask_np.shape), dtype=np.float32)
+
+    for i, coord in enumerate(colon_coords):
+        proj_val = projections[i]
+        if proj_val < percentile_33:
+            channel = 0  # Proximal
+        elif proj_val < percentile_66:
+            channel = 1  # Middle
+        else:
+            channel = 2  # Distal
+
+        three_channel[channel, coord[0], coord[1], coord[2]] = 1.0
+
+    return three_channel
+
+
+def _split_skeleton(mask_np):
+    """
+    Split mask into 3 sections based on centerline skeleton (more accurate).
+    """
+    # Find largest connected component
+    from scipy.ndimage import label
+
+    labeled, num_features = label(mask_np)
+
+    if num_features == 0:
+        return np.zeros((3, *mask_np.shape), dtype=np.float32)
+
+    # Get largest component
+    if num_features > 1:
+        sizes = [(labeled == i).sum() for i in range(1, num_features + 1)]
+        largest_label = np.argmax(sizes) + 1
+        mask_np = (labeled == largest_label).astype(np.uint8)
+
+    # Extract skeleton
+    skeleton = skeletonize(mask_np)
+    skeleton_coords = np.argwhere(skeleton)
+
+    if len(skeleton_coords) < 3:
+        # Fallback to spatial method if skeleton too small
+        return _split_spatial(mask_np)
+
+    # Order skeleton points along path
+    ordered_skeleton = _order_skeleton_points(skeleton_coords)
+
+    # Divide into thirds
+    n = len(ordered_skeleton)
+    section_1 = ordered_skeleton[: n // 3]
+    section_2 = ordered_skeleton[n // 3 : 2 * n // 3]
+    section_3 = ordered_skeleton[2 * n // 3 :]
+
+    # Build KD-trees for each section
+    tree_1 = cKDTree(section_1)
+    tree_2 = cKDTree(section_2)
+    tree_3 = cKDTree(section_3)
+
+    # Get all colon voxels
+    colon_coords = np.argwhere(mask_np > 0)
+
+    # Create 3-channel output
+    three_channel = np.zeros((3, *mask_np.shape), dtype=np.float32)
+
+    # Assign each voxel to nearest section
+    for coord in colon_coords:
+        dist_1 = tree_1.query(coord)[0]
+        dist_2 = tree_2.query(coord)[0]
+        dist_3 = tree_3.query(coord)[0]
+
+        distances = [dist_1, dist_2, dist_3]
+        nearest_section = np.argmin(distances)
+
+        three_channel[nearest_section, coord[0], coord[1], coord[2]] = 1.0
+
+    return three_channel
+
+
+def _order_skeleton_points(skeleton_coords):
+    """
+    Order skeleton points along the path from one end to the other.
+    """
+    n = len(skeleton_coords)
+
+    if n < 2:
+        return skeleton_coords
+
+    # Build distance matrix (use sparse for efficiency)
+    tree = cKDTree(skeleton_coords)
+
+    # For each point, find k nearest neighbors (k=5 for colon topology)
+    k = min(5, n)
+    distances, indices = tree.query(skeleton_coords, k=k)
+
+    # Build adjacency matrix
+    rows = np.repeat(np.arange(n), k)
+    cols = indices.flatten()
+    data = distances.flatten()
+
+    adj_matrix = csr_matrix((data, (rows, cols)), shape=(n, n))
+
+    # Find endpoints (points with only 1-2 neighbors within small distance)
+    threshold = np.percentile(
+        distances[:, 1], 25
+    )  # 25th percentile of nearest neighbor distances
+    degree = (distances < threshold * 1.5).sum(axis=1)
+
+    endpoints = np.where(degree <= 2)[0]
+
+    if len(endpoints) < 2:
+        # No clear endpoints, just use furthest points
+        endpoints = [0, n - 1]
+
+    # Compute shortest path from first to last endpoint
+    start_idx = endpoints[0]
+
+    # Find furthest endpoint from start
+    distances_from_start = shortest_path(adj_matrix, indices=start_idx)
+    valid_endpoints = [ep for ep in endpoints if np.isfinite(distances_from_start[ep])]
+
+    if len(valid_endpoints) < 2:
+        # Fallback: use simple ordering
+        return skeleton_coords
+
+    end_idx = valid_endpoints[
+        np.argmax([distances_from_start[ep] for ep in valid_endpoints])
+    ]
+
+    # Get shortest path
+    _, predecessors = shortest_path(
+        adj_matrix, indices=start_idx, return_predecessors=True
+    )
+
+    # Reconstruct path
+    path = []
+    current = end_idx
+    while current != -9999 and current != start_idx:
+        path.append(current)
+        current = predecessors[current]
+        if current == -9999:
+            break
+
+    path.append(start_idx)
+    path = path[::-1]
+
+    if len(path) < n // 2:
+        # Path reconstruction failed, fallback to spatial ordering
+        projections = skeleton_coords @ skeleton_coords.mean(axis=0)
+        sorted_indices = np.argsort(projections)
+        return skeleton_coords[sorted_indices]
+
+    return skeleton_coords[path]
+
+
+def dataset_depended_transform_labels(x, kidneys_same_index=False, split_colon=False, split_colon_method="skeleton") -> torch.Tensor:
     """
     Apply the transform_labels function to the dependent dataset.
     Resulting label map:
@@ -113,7 +335,7 @@ def dataset_depended_transform_labels(x):
             17: 30,
         }
         x = transform_labels(x, label_map)
-        x = x - 30
+        x.sub_(30)
 
     elif "female_cases_refined_by_md" in pathname:
 
@@ -146,7 +368,7 @@ def dataset_depended_transform_labels(x):
         }
 
         x = transform_labels(x, label_map)
-        x = x - 30
+        x.sub_(30)
 
     elif "male_cases_refined_by_md" in pathname:
         label_map = {
@@ -176,7 +398,8 @@ def dataset_depended_transform_labels(x):
             23: 30,
         }
         x = transform_labels(x, label_map)
-        x = x - 30
+        x.sub_(30)
+
     elif ("a_grade_colons_not_in_refined_by_md" in pathname) or (
         "c_grade_colons/masks/" in pathname
     ):
@@ -196,6 +419,46 @@ def dataset_depended_transform_labels(x):
         x = transform_labels(x, label_map)
     else:
         raise ValueError(f"Unknown dataset for {pathname}")
+
+    if kidneys_same_index:
+        # Map kidney_right (8) to kidney_left (7)
+        kidney_merge_map = {8: 7}
+        x = transform_labels(x, kidney_merge_map)
+
+    if split_colon:
+        # Split colon (1) into 3 sections
+        colon_mask = (x == 1).float()
+
+        # Store original shape and squeeze both colon_mask and x
+        original_shape = x.shape
+        original_ndim = colon_mask.ndim
+
+        if colon_mask.ndim != 3:
+            colon_mask = colon_mask.squeeze()
+            x_squeezed = x.squeeze()  # Squeeze x as well
+            if colon_mask.ndim != 3:
+                raise ValueError("Colon mask must be 3D after squeezing.")
+        else:
+            x_squeezed = x
+
+        three_channel_colon = split_colon_into_3_sections(
+            colon_mask, method=split_colon_method, device=x.device
+        )
+
+        # Remove original colon label
+        x_squeezed[x_squeezed == 1] = 0
+
+        # Label 3 parts as 101, 102, 103
+        for i in range(3):
+            new_label = 101 + i
+            x_squeezed[three_channel_colon[i] > 0] = new_label
+
+        # Restore original shape if it was squeezed
+        if original_ndim != 3:
+            x = x_squeezed.reshape(original_shape)
+        else:
+            x = x_squeezed
+
     return x
 
 
@@ -352,7 +615,7 @@ class MaskToSDFd(monai.transforms.MapTransform):
         normalize: bool = True,
         float64_distances: bool = False,
         allow_missing_keys: bool = False,
-        device: Optional[torch.device] = "cuda",
+        device: Optional[torch.device] = "cpu",
     ) -> None:
         """
         Args:
@@ -375,14 +638,13 @@ class MaskToSDFd(monai.transforms.MapTransform):
         for key in self.keys:
             spacing = d.get(self.spacing_key, None)
             original_device = d[key].device
+            arr = d[key]
             sdf_array = mask_to_sdf(
-                d[key].as_tensor().to(self.device),
+                arr,
                 spacing=spacing.squeeze(),
                 inside_positive=self.inside_positive,
                 normalize=self.normalize,
                 float64_distances=self.float64_distances,
             )
-            d[key] = d[key].set_array(sdf_array.to(original_device))
-            d[key] = d[key].to("cpu")
+            d[key].set_array(sdf_array)
         return d
-    

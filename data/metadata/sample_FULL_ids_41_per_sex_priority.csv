@@ -1,0 +1,83 @@
+unique_id,sex,age,height,weight,Ethnicity,First Race,slice_thickness
+Patient_00008_Study_74866_Series_03,Male,73.0,1.72,87.0,Not Hispanic/Latino,Black or African American,3.75
+Patient_00019_Study_30257_Series_04,Male,26.0,1.77,125.0,Not Hispanic/Latino,Caucasian/White,0.625
+Patient_00042_Study_64824_Series_03,Female,67.0,1.53,49.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00060_Study_40021_Series_04,Male,21.0,1.82,88.0,Not Hispanic/Latino,Caucasian/White,0.625
+Patient_00061_Study_77257_Series_03,Female,78.0,1.52,63.0,Not Hispanic/Latino,Black or African American,3.75
+Patient_00063_Study_71187_Series_03,Male,72.0,1.82,95.0,Not Hispanic/Latino,Black or African American,3.75
+Patient_00091_Study_67084_Series_03,Male,66.0,1.75,45.0,Not Hispanic/Latino,Black or African American,3.75
+Patient_00092_Study_71866_Series_03,Male,67.0,1.82,97.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00097_Study_02802_Series_04,Male,77.0,1.77,131.0,Not Hispanic/Latino,Black or African American,0.625
+Patient_00101_Study_04807_Series_04,Female,65.0,1.58,85.0,Not Hispanic/Latino,Caucasian/White,0.625
+Patient_00131_Study_10642_Series_03,Male,73.0,1.91,74.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00166_Study_51760_Series_04,Female,73.0,1.62,57.0,Not Hispanic/Latino,Caucasian/White,0.625
+Patient_00192_Study_04711_Series_04,Female,70.0,1.54,98.0,Not Hispanic/Latino,Caucasian/White,0.625
+Patient_00201_Study_03053_Series_03,Male,71.0,1.93,98.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00224_Study_66444_Series_04,Male,70.0,1.79,105.0,Not Hispanic/Latino,Black or African American,0.625
+Patient_00229_Study_12036_Series_03,Female,78.0,1.45,45.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00230_Study_65327_Series_03,Female,73.0,1.59,68.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00240_Study_26205_Series_03,Male,63.0,1.94,127.0,Not Hispanic/Latino,Black or African American,3.75
+Patient_00270_Study_48484_Series_03,Male,64.0,1.82,111.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00287_Study_77204_Series_03,Male,64.0,1.8,89.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00294_Study_27816_Series_03,Male,44.0,1.93,88.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00368_Study_44282_Series_03,Male,69.0,1.77,98.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00390_Study_24261_Series_03,Female,55.0,1.65,49.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00404_Study_10686_Series_04,Female,36.0,1.65,81.0,Not Hispanic/Latino,Caucasian/White,0.625
+Patient_00413_Study_64665_Series_03,Female,73.0,1.52,92.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00443_Study_53355_Series_04,Female,72.0,1.54,49.0,Not Hispanic/Latino,Asian,0.625
+Patient_00481_Study_47041_Series_03,Male,65.0,1.85,128.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00509_Study_57068_Series_03,Female,64.0,1.72,91.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00569_Study_57045_Series_03,Male,73.0,1.77,115.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00571_Study_86356_Series_03,Female,74.0,1.58,88.0,Not Hispanic/Latino,Asian,3.75
+Patient_00606_Study_40311_Series_03,Male,64.0,1.91,135.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00621_Study_81467_Series_04,Female,61.0,1.65,110.0,Not Hispanic/Latino,Caucasian/White,0.625
+Patient_00704_Study_72714_Series_04,Male,81.0,1.85,74.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00758_Study_26155_Series_03,Male,77.0,1.75,98.0,Not Hispanic/Latino,Black or African American,3.75
+Patient_00768_Study_28780_Series_03,Male,60.0,1.7,83.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00786_Study_78228_Series_04,Female,56.0,1.61,73.0,Not Hispanic/Latino,Caucasian/White,0.625
+Patient_00818_Study_36558_Series_04,Female,56.0,1.49,64.0,Not Hispanic/Latino,Caucasian/White,0.625
+Patient_00825_Study_71433_Series_04,Male,74.0,1.7,69.0,Not Hispanic/Latino,Caucasian/White,0.625
+Patient_00837_Study_60638_Series_03,Male,52.0,1.82,80.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00853_Study_48468_Series_04,Female,73.0,1.72,67.0,Not Hispanic/Latino,Caucasian/White,1.25
+Patient_00870_Study_32565_Series_03,Female,57.0,1.55,70.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00887_Study_41268_Series_03,Female,81.0,1.53,50.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00903_Study_73352_Series_03,Male,74.0,1.67,90.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00922_Study_11048_Series_03,Male,76.0,1.81,133.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00928_Study_25543_Series_03,Male,77.0,1.67,112.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00942_Study_24745_Series_03,Male,20.0,1.58,80.0,Hispanic Other,Other,3.75
+Patient_01926_Study_00485_Series_03,Male,27.0,1.86,57.0,Not Hispanic/Latino,Asian,3.75
+Patient_01153_Study_01324_Series_03,Male,70.0,1.67,102.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_01526_Study_05210_Series_04,Male,70.0,1.98,110.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_01889_Study_14282_Series_05,Male,79.0,1.98,104.0,Not Hispanic/Latino,Black or African American,3.75
+Patient_01081_Study_15108_Series_03,Female,57.0,1.6,60.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_02850_Study_16136_Series_04,Female,46.0,1.71,110.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_01992_Study_16161_Series_05,Female,46.0,1.57,103.0,Not Hispanic/Latino,Black or African American,3.75
+Patient_01184_Study_17516_Series_05,Female,82.0,1.67,59.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_02093_Study_18554_Series_03,Male,86.0,1.75,78.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_02486_Study_20155_Series_03,Female,70.0,1.68,105.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_02428_Study_21066_Series_03,Female,66.0,1.6,122.0,Not Hispanic/Latino,Black or African American,3.75
+Patient_01613_Study_24447_Series_03,Male,70.0,1.88,64.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_01174_Study_24771_Series_05,Female,64.0,1.77,90.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_01599_Study_28744_Series_04,Female,57.0,1.61,95.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_01790_Study_31771_Series_05,Female,65.0,1.56,116.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_02936_Study_32531_Series_03,Female,69.0,1.72,73.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_01144_Study_35487_Series_05,Female,64.0,1.7,100.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_02784_Study_38230_Series_05,Female,39.0,1.71,81.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_02036_Study_43845_Series_03,Male,12.0,1.54,45.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_01997_Study_47437_Series_03,Male,68.0,1.7,58.0,Not Hispanic/Latino,Asian,3.75
+Patient_02460_Study_47884_Series_03,Female,74.0,1.76,55.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_01789_Study_48702_Series_03,Male,73.0,1.7,75.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_02542_Study_51665_Series_03,Male,55.0,1.8,67.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_02380_Study_57271_Series_03,Female,82.0,1.47,73.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_01605_Study_57704_Series_03,Male,53.0,1.82,107.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_02175_Study_58710_Series_05,Female,71.0,1.7,135.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_02290_Study_65547_Series_03,Female,55.0,1.65,74.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_00867_Study_67703_Series_05,Male,74.0,1.77,78.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_02398_Study_76866_Series_03,Female,52.0,1.54,72.0,Not Hispanic/Latino,Black or African American,3.75
+Patient_01567_Study_81608_Series_03,Female,26.0,1.69,95.0,Not Reported/Declined,Not Reported/Declined,3.75
+Patient_01836_Study_83806_Series_03,Female,48.0,1.54,51.0,Not Hispanic/Latino,Asian,3.75
+Patient_01834_Study_84412_Series_03,Female,56.0,1.74,100.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_02868_Study_85322_Series_05,Female,62.0,1.6,61.0,Not Hispanic/Latino,Caucasian/White,3.75
+Patient_02562_Study_02175_Series_04,Female,77.0,1.65,80.0,Not Hispanic/Latino,Caucasian/White,0.625
+Patient_02401_Study_60430_Series_04,Male,52.0,1.72,57.0,Not Hispanic/Latino,Asian,0.625
+Patient_01815_Study_78553_Series_04,Male,21.0,1.68,48.0,Not Hispanic/Latino,Caucasian/White,0.625

@@ -14,7 +14,8 @@ set -euo pipefail
 
 # ----------------------------- defaults --------------------------
 # AIM_REPO="/home/yb107/cvpr2025/DukeDiffSeg"
-AIM_REPO="/home/yb107/cvpr2025/aim_repo/dukediffseg"
+# AIM_REPO="/home/yb107/cvpr2025/aim_repo/dukediffseg"
+AIM_REPO="/home/yb107/cvpr2025/aim_repo/dukediffseg6_0"
 AIM_PORT=43800
 ACTION=""
 # -----------------------------------------------------------------
@@ -38,8 +39,10 @@ if [[ -z "$ACTION" ]]; then
 fi
 # -----------------------------------------------------------------
 
-PIDFILE="$AIM_REPO/aim/.aim_server.pid"
-LOGFILE="$AIM_REPO/aim/.aim_server.log"
+# PIDFILE="$AIM_REPO/aim/.aim_server.pid"
+# LOGFILE="$AIM_REPO/aim/.aim_server.log"
+PIDFILE="$AIM_REPO/.aim_server.pid"
+LOGFILE="$AIM_REPO/.aim_server.log"
 
 mkdir -p "$AIM_REPO"
 
@@ -76,7 +79,8 @@ case "$ACTION" in
       echo "Starting Aim UI on port $AIM_PORT ..."
       # Start in its own process-group so we can kill the whole tree later
       cd $AIM_REPO
-      setsid nohup pipenv run aim up --repo "aim/" --port "$AIM_PORT" \
+      # setsid nohup pipenv run aim up --repo "aim/" --port "$AIM_PORT" \
+      setsid nohup pipenv run aim up --repo "." --port "$AIM_PORT" \
             > "$LOGFILE" 2>&1 &
       echo $! > "$PIDFILE"
 

@@ -8,6 +8,7 @@ from monai.transforms import (
     EnsureChannelFirstd,
     SaveImage,
 )
+from typing import Callable, List, Optional, Tuple, Dict, Any
 import pandas as pd
 from monai.data import ITKReader, ImageReader, ImageWriter, MetaTensor
 from typing import Sequence, Union
@@ -27,8 +28,9 @@ from monai.visualize.img2tensorboard import plot_2d_or_3d_image
 from .visualize import Visualizer, render3d
 from typing import Union, Optional, Tuple, List
 from .loss import SoftSkeletonize 
+from skimage.morphology import skeletonize
 # from skimage.morphology import skeletonize_3d
-
+from .data import dataset_depended_transform_labels
 
 import random
 from collections import deque
@@ -741,22 +743,24 @@ class CropForegroundAxisd(MapTransform):
         for key in self.keys:
             if key not in d:
                 continue
-            d[key] = _safe_crop(d[key])
+            arr = d[key]
+            d[key] = _safe_crop(arr)
 
-            meta_key = f"{key}_meta_dict"
-            if meta_key in d and isinstance(d[meta_key], dict):
-                d[meta_key]["spatial_shape"] = np.asarray(
-                    d[key].shape[-3:], dtype=np.int64
-                )
+            # meta_key = f"{key}_meta_dict"
+            # if meta_key in d and isinstance(d[meta_key], dict):
+            #     d[meta_key]["spatial_shape"] = np.asarray(
+            #         d[key].shape[-3:], dtype=np.int64
+            #     )
 
         # Also crop source_key itself if it's not already included
         if self.source_key not in self.keys and self.source_key in d:
-            d[self.source_key] = _safe_crop(d[self.source_key])
-            meta_key = f"{self.source_key}_meta_dict"
-            if meta_key in d and isinstance(d[meta_key], dict):
-                d[meta_key]["spatial_shape"] = np.asarray(
-                    d[self.source_key].shape[-3:], dtype=np.int64
-                )
+            arr = d[self.source_key]
+            d[self.source_key] = _safe_crop(arr)
+            # meta_key = f"{self.source_key}_meta_dict"
+            # if meta_key in d and isinstance(d[meta_key], dict):
+            #     d[meta_key]["spatial_shape"] = np.asarray(
+            #         d[self.source_key].shape[-3:], dtype=np.int64
+            #     )
 
         return d
 
@@ -776,260 +780,6 @@ import torch
 
 
 class SmoothColonMask(Transform):
-    """
-    Enhanced colon mask smoothing with preprocessing steps.
-
-    Processing pipeline:
-    1. BREAK THIN NECKS: Remove thin connections (appendages connected by few voxels)
-    2. DROP SMALL COMPONENTS: Remove components below volume threshold
-    3. DILATE: Expand mask outward (fills gaps, connects close parts, smooths bumps)
-    4. ERODE: Shrink back by same amount (returns to original size but smoothed)
-
-    Args:
-        iterations: Number of dilation/erosion iterations for smoothing (default: 3)
-                   Higher = more aggressive smoothing. Typical range: 2-5
-
-        connectivity: Structuring element connectivity (1, 2, or 3)
-                     1 = face connectivity (6-connected in 3D)
-                     2 = face+edge connectivity (18-connected in 3D)
-                     3 = face+edge+corner connectivity (26-connected in 3D)
-                     Default: 2 (good balance)
-
-        min_neck_thickness: Minimum thickness for connections in voxels (default: 3)
-                           Connections thinner than this will be broken
-                           Set to 0 to disable neck breaking
-
-        min_component_ratio: Minimum component size as ratio of largest component (default: 0.1)
-                            Components smaller than this ratio will be removed
-                            E.g., 0.1 means drop components < 10% of largest
-                            Set to 0 to keep all components
-    """
-
-    def __init__(
-        self,
-        iterations: int = 3,
-        connectivity: int = 2,
-        min_neck_thickness: int = 3,
-        min_component_ratio: float = 0.1,
-    ):
-        self.iterations = iterations
-        self.connectivity = connectivity
-        self.min_neck_thickness = min_neck_thickness
-        self.min_component_ratio = min_component_ratio
-
-        # Create structuring element for dilation/erosion
-        self.struct_element = generate_binary_structure(3, connectivity)
-
-    def _break_thin_necks(self, mask: np.ndarray) -> np.ndarray:
-        """
-        Break thin connections (necks) between regions.
-        Uses distance transform to identify thin structures.
-
-        Args:
-            mask: Binary mask
-
-        Returns:
-            Mask with thin necks removed
-        """
-        if self.min_neck_thickness <= 0:
-            return mask
-
-        # Compute distance transform
-        # Each voxel's value = distance to nearest background voxel
-        dist_transform = distance_transform_edt(mask)
-
-        # Identify thin regions: where distance to edge is very small
-        # If a region has radius < min_neck_thickness/2, it's a thin neck
-        thin_threshold = self.min_neck_thickness / 2.0
-
-        # Keep only voxels that are "thick enough"
-        thick_mask = dist_transform >= thin_threshold
-
-        # Combine: keep voxels that are both in original mask AND thick enough
-        result = mask & thick_mask
-
-        return result
-
-    def _remove_small_components(self, mask: np.ndarray) -> np.ndarray:
-        """
-        Remove connected components below size threshold.
-
-        Args:
-            mask: Binary mask
-
-        Returns:
-            Mask with small components removed
-        """
-        if self.min_component_ratio <= 0:
-            return mask
-
-        # Label connected components
-        labeled_mask, num_components = label(mask)
-
-        if num_components == 0:
-            return mask
-
-        # Calculate size of each component
-        component_sizes = {}
-        for i in range(1, num_components + 1):
-            component_sizes[i] = np.sum(labeled_mask == i)
-
-        # Find largest component
-        max_size = max(component_sizes.values())
-        threshold_size = max_size * self.min_component_ratio
-
-        # Create output mask with only large components
-        result = np.zeros_like(mask, dtype=bool)
-        for component_label, size in component_sizes.items():
-            if size >= threshold_size:
-                result |= labeled_mask == component_label
-
-        return result
-
-    def _smooth_morphological(self, mask: np.ndarray) -> np.ndarray:
-        """
-        Smooth mask using dilation followed by erosion (morphological closing).
-
-        Args:
-            mask: Binary mask
-
-        Returns:
-            Smoothed mask
-        """
-        # STEP 1: Dilate (expand outward)
-        dilated = mask.copy()
-        for _ in range(self.iterations):
-            dilated = binary_dilation(dilated, structure=self.struct_element)
-
-        # STEP 2: Erode (shrink back)
-        smoothed = dilated.copy()
-        for _ in range(self.iterations):
-            smoothed = binary_erosion(smoothed, structure=self.struct_element)
-
-        return smoothed
-
-    def __call__(
-        self, mask: Union[np.ndarray, torch.Tensor]
-    ) -> Union[np.ndarray, torch.Tensor]:
-        """
-        Apply full processing pipeline to mask with smart early exits.
-
-        Logic:
-        - If already single component → skip everything, return as-is
-        - After neck breaking + component removal:
-          - If single component remains → skip dilation/erosion
-          - If multiple components → apply dilation/erosion for smoothing
-
-        Args:
-            mask: Binary segmentation mask
-
-        Returns:
-            Processed mask in same format as input
-        """
-        # Handle torch tensors
-        is_torch = isinstance(mask, torch.Tensor)
-        if is_torch:
-            device = mask.device
-            dtype = mask.dtype
-            mask_np = mask.detach().cpu().numpy()
-        else:
-            mask_np = mask.copy()
-
-        # Ensure binary
-        mask_np = mask_np.astype(bool)
-
-        # Handle channel dimension
-        squeeze_dim = False
-        if mask_np.ndim == 4 and mask_np.shape[0] == 1:
-            mask_np = mask_np[0]
-            squeeze_dim = True
-
-        # EARLY EXIT CHECK: If already single component, skip all processing
-        _, num_components_initial = label(mask_np)
-
-        if num_components_initial <= 1:
-            # Already clean, return as-is
-            result = mask_np
-        else:
-            # Multiple components detected, proceed with processing
-
-            # Step 1: Break thin necks (if enabled)
-            if self.min_neck_thickness > 0:
-                result = self._break_thin_necks(mask_np)
-            else:
-                result = mask_np
-
-            # Step 2: Remove small components (if enabled)
-            if self.min_component_ratio > 0:
-                result = self._remove_small_components(result)
-            else:
-                result = result
-
-            # Check components after preprocessing
-            _, num_components_after_prep = label(result)
-
-            # Step 3: Apply smoothing only if multiple components remain
-            # (smoothing helps join/blend multiple regions)
-            if num_components_after_prep > 1:
-                result = self._smooth_morphological(result)
-            # else: single component after preprocessing, skip smoothing
-
-        # Restore dimensions
-        if squeeze_dim:
-            result = result[np.newaxis, ...]
-
-        # Convert back to torch if needed
-        if is_torch:
-            result = torch.from_numpy(result.astype(np.float32)).to(
-                device=device, dtype=dtype
-            )
-
-        return result
-
-
-class SmoothColonMaskSkeld(Transform):
-    """
-    Dictionary-based version for MONAI pipelines.
-
-    Args:
-        keys: Keys to apply transform to
-        iterations: Number of dilation/erosion iterations (default: 3)
-        connectivity: Structuring element connectivity (1, 2, or 3)
-        min_neck_thickness: Minimum thickness for connections in voxels (default: 3)
-        min_component_ratio: Minimum component size ratio (default: 0.1)
-        allow_missing_keys: Don't raise error for missing keys
-    """
-
-    def __init__(
-        self,
-        keys: KeysCollection,
-        iterations: int = 3,
-        connectivity: int = 2,
-        min_neck_thickness: int = 3,
-        min_component_ratio: float = 0.1,
-        allow_missing_keys: bool = False,
-    ):
-        self.keys = keys if isinstance(keys, (list, tuple)) else [keys]
-        self.transform = SmoothColonMask(
-            iterations=iterations,
-            connectivity=connectivity,
-            min_neck_thickness=min_neck_thickness,
-            min_component_ratio=min_component_ratio,
-        )
-        self.allow_missing_keys = allow_missing_keys
-
-    def __call__(self, data: dict) -> dict:
-        """Apply transform to dictionary"""
-        d = dict(data)
-        for key in self.keys:
-            if key in d:
-                d[key] = self.transform(d[key])
-            elif not self.allow_missing_keys:
-                raise KeyError(f"Key '{key}' not found in data")
-        return d
-
-
-class SmoothColonMaskSkel(Transform):
     """
     Enhanced colon mask smoothing with endpoint protection and anatomical awareness.
 
@@ -1124,7 +874,7 @@ class SmoothColonMaskSkel(Transform):
             List of (x, y, z) coordinates of endpoint voxels
         """
         # Create skeleton (1-voxel thick centerline)
-        skeleton = skeletonize_3d(mask)
+        skeleton = skeletonize(mask, method="lee")
 
         # Find skeleton voxels
         skeleton_coords = np.argwhere(skeleton)
@@ -1467,7 +1217,7 @@ class SmoothColonMaskSkel(Transform):
         return result
 
 
-class SmoothColonMaskSkeld(Transform):
+class SmoothColonMaskd(Transform):
     """
     Dictionary-based version for MONAI pipelines with endpoint protection.
 
@@ -1496,7 +1246,7 @@ class SmoothColonMaskSkeld(Transform):
         allow_missing_keys: bool = False,
     ):
         self.keys = keys if isinstance(keys, (list, tuple)) else [keys]
-        self.transform = SmoothColonMaskSkel(
+        self.transform = SmoothColonMask(
             iterations=iterations,
             connectivity=connectivity,
             min_neck_thickness=min_neck_thickness,
@@ -1512,7 +1262,233 @@ class SmoothColonMaskSkeld(Transform):
         d = dict(data)
         for key in self.keys:
             if key in d:
-                d[key] = self.transform(d[key])
+                d[key].set_array(self.transform(d[key]))
             elif not self.allow_missing_keys:
                 raise KeyError(f"Key '{key}' not found in data")
         return d
+
+
+class HarmonizeLabelsd(MapTransform):
+    """
+    Wraps your dataset_depended_transform_labels(...) into a MapTransform.
+    Applies in-place harmonization on multi-organ masks.
+    """
+
+    def __init__(self, keys: Sequence[str], kidneys_same_index: bool = True, split_colon: bool = False, split_colon_method: str = "skeleton"):
+        super().__init__(keys)
+        self.kidneys_same_index = kidneys_same_index
+        self.split_colon = split_colon
+        self.split_colon_method = split_colon_method
+
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        d = dict(data)
+        for key in self.keys:
+            arr = d[key]
+            # Expecting Tensor/MetaTensor-like with .set_array; preserve dtype
+            out = dataset_depended_transform_labels(
+                arr, kidneys_same_index=self.kidneys_same_index, split_colon=self.split_colon, split_colon_method=self.split_colon_method
+            )
+            d[key] = out
+        return d
+
+
+class EnsureAllTorchd(MapTransform):
+    """
+    Minimal: only handle top-level values that are MetaTensor.
+    For each such value, convert any numpy items in .meta to torch tensors.
+    Prints (data_key, meta_key) pairs that were converted.
+    """
+
+    def __init__(self, print_changes: bool = True):
+        super().__init__(keys=None)
+        self.print_changes = print_changes
+
+    def __call__(self, data):
+        out = dict(data)
+        changes = []
+
+        for data_key, val in list(out.items()):
+            if isinstance(val, MetaTensor):
+                # Iterate through the meta dict and convert numpy -> torch
+                for meta_key, meta_val in list(val.meta.items()):
+                    if isinstance(meta_val, (np.ndarray, np.generic)):
+                        val.meta[meta_key] = torch.as_tensor(meta_val)
+                        changes.append((data_key, meta_key))
+
+        if self.print_changes and changes:
+            print(
+                f"[EnsureAllTorchd] Converted {len(changes)} numpy item(s) in MetaTensor.meta -> torch.Tensor:"
+            )
+            for dk, mk in changes:
+                print(f"  - data_key='{dk}', meta_key='{mk}'")
+
+        return out
+
+
+class AddSpacingTensord(MapTransform):
+    """
+    Extracts spacing from meta (after Spacingd/Orientationd) and stores a torch tensor
+    under key 'spacing_tensor'. Works once per sample (no 'keys' needed at call site).
+    """
+
+    def __init__(self, ref_key: str):
+        super().__init__(keys=[ref_key])
+        self.ref_key = ref_key
+
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        d = dict(data)
+        aff = d[self.ref_key].meta["affine"]
+
+        # squeeze the affine to 2D
+        aff = torch.as_tensor(aff, dtype=torch.float32).squeeze()
+        R = aff[:3, :3]
+
+        spacing = torch.norm(R, p=2, dim=1)
+
+        d["spacing_tensor"] = spacing
+        return d
+
+
+class FilterAndRelabeld(MapTransform):
+    """
+    - IMAGE: union of conditioning organs -> binary {0,1}
+    - LABEL: target organ only           -> binary {0,1}
+    Uses memory-lean ops (torch.isin) and preserves dtype/container.
+    """
+
+    def __init__(
+        self,
+        image_key: str,
+        label_key: str,
+        conditioning_organs: Sequence[int],
+        target_organ: int,
+    ):
+        super().__init__(keys=[image_key, label_key])
+        self.image_key = image_key
+        self.label_key = label_key
+        self.target_organ = int(target_organ)
+        self.conditioning = torch.as_tensor(
+            list(conditioning_organs), dtype=torch.int64
+        )
+
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        d = dict(data)
+
+        # IMAGE -> union mask of conditioning organs
+        img = d[self.image_key]
+        if self.conditioning.numel() > 0:
+            cond = torch.isin(img, self.conditioning)
+            d[self.image_key] = cond.to(img.dtype)  # preserve dtype
+        else:
+            d[self.image_key].set_array(torch.zeros_like(img))
+  
+
+        # LABEL -> target organ only
+        lbl = d[self.label_key]
+        tgt = lbl == self.target_organ
+        d[self.label_key] = tgt.to(lbl.dtype)  # preserve dtype
+
+        return d
+
+
+class DivideFilterAndRelabeld(MapTransform):
+    """
+    - IMAGE: union of conditioning organs -> binary {0,1}
+    - LABEL: target organ only           -> binary {0,1}
+    Uses memory-lean ops (torch.isin) and preserves dtype/container.
+    """
+
+    def __init__(
+        self,
+        image_key: str,
+        label_key: str,
+        # conditioning_organs: Sequence[int],
+        generation_sequence: list,
+        target_organs: list,
+        label_to_organ_name: dict,
+    ):
+        super().__init__(keys=[image_key, label_key])
+        self.image_key = image_key
+        self.label_key = label_key
+        self.target_organs = target_organs
+        self.generation_sequence = generation_sequence
+        self.label_to_organ_name = label_to_organ_name
+        
+    def get_conditioning_organs(
+        self, target_organ_index: int, generation_order: list = None
+    ) -> List[int]:
+        if generation_order is None:
+            generation_order = self.generation_sequence
+            
+        if target_organ_index not in generation_order:
+            raise ValueError(
+                f"Target organ {target_organ_index} not in generation order: {generation_order}"
+            )
+            
+        pos = generation_order.index(target_organ_index)
+        return generation_order[:pos]
+    
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        for target_organ in self.target_organs:
+            tmp_dict = dict()
+            conditioning_organs = self.get_conditioning_organs(target_organ, self.generation_sequence)
+            
+            # Create a copy of image and label for each target organ
+            tmp_dict["Image"] = data[self.image_key].clone()
+            tmp_dict["Label"] = data[self.label_key].clone()
+            
+            transform = FilterAndRelabeld(
+                image_key="Image",
+                label_key="Label",
+                conditioning_organs=conditioning_organs,
+                target_organ=target_organ,
+            )
+
+            tmp_dict = transform(tmp_dict)
+            organ_name = self.label_to_organ_name[target_organ]
+            data[f"Image_{organ_name}"] = tmp_dict["Image"]
+            data[f"Label_{organ_name}"] = tmp_dict["Label"]
+
+        return data
+
+
+class Probe(MapTransform):
+    def __init__(self, keys=[], allow_missing_keys = False):
+        super().__init__(keys, allow_missing_keys)
+
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        logging.info(f"Probe transform called on data keys: {list(data.keys())}")
+        self.keys = self.keys if self.keys else list(data.keys())
+        # Log Data Types for each key
+        for key in self.keys:
+            if key in data:
+                logging.info(f"Key: {key}, Type: {type(data[key])}, UniqueValues Len: {data[key].unique().numel()}, Non-zero Volume: {data[key].sum()} Shape: {getattr(data[key], 'shape', 'N/A')}")
+            else:
+                logging.warning(f"Key: {key} not found in data.")
+        return data
+
+
+class CombineKeysd(MapTransform):
+    def __init__(self, keys, result_key, as_binary=True):
+        if not isinstance(keys, (list, tuple)):
+            keys = [keys]
+        self.keys = keys
+        self.result_key = result_key
+        self.as_binary = as_binary
+        
+    def __call__(self, data):
+        # Check if all keys are present and have same shape
+        shape = data[self.keys[0]].shape
+        for k in self.keys:
+            if data[k].shape != shape:
+                raise ValueError(f"All keys must have the same shape. Key {k} has shape {data[k].shape}, expected {shape}.")
+        
+        combined = torch.zeros_like(data[self.keys[0]])
+        for idx, k in enumerate(self.keys):
+            if self.as_binary:
+                combined += (data[k] > 0).to(combined.dtype)
+            else:
+                combined[data[k] > 0] = idx + 1  # Labels start from 1
+        
+        data[self.result_key].set_array(combined)
+        return data

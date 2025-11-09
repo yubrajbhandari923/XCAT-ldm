@@ -217,12 +217,27 @@ Experiments Up Next:
 ## 🧪 Experiment Log – 2025-10-07
 
 Meeting Notes: 
-- Fix the start/ end of tube no erosion/dialation
-- Volume Quality Control
-- Medical Student Verification
+- Fix the start/ end of tube no erosion/dialation [Done]
+- Volume Quality Control [Won't Do]
+- Medical Student Verification 
 - Number of connected component
+- Length Comparision
 
 - MedshapeNet for fixing things ?
 - 
 
 Show statistical improvement. 
+
+## 🧪 Experiment Log – 2025-10-14
+- Extend the model to other abdomenal organs as well.
+- Change the denoising model with standrad monai's implementation with attention modules
+- Wrap up registration ? Same model for those structures as well.
+- Talk to Paul for other phantoms in voxel space and 
+
+New experiment to challenge anatomyGen
+Recommended generation order
+
+Next Experiments:
+Liver -> gallbladder -> spleen -> kidneys -> stomach -> pancrease -> duodenum -> urinary_bladder -> rectum -> colon -> small_bowel
+
+[5,12,6,7&8,4,9,11,10,2,1,3]

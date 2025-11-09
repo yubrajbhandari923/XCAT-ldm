@@ -113,6 +113,7 @@ class AimIgnite3DImageHandler:
             .split(".")[0]
             .replace("_trans", "")
         )
+        
         tag_name = f"{self.tag} {' '.join(img_name.split('_')[:2])}"
 
         if self.plot_once and tag_name in AimIgnite3DImageHandler.plotted_tags:

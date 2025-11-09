@@ -1,0 +1,305 @@
+# =========================
+# Experiment meta
+# =========================
+experiment:
+  name: DiffUnet
+  version: 7.5
+  description: "Flim based Conditioning"
+  tags: ["DiffUNet"]
+  debug: false
+  hash: null
+
+seed: 42
+
+logging:
+  use_aim: true                  # will be used only if utils exist
+  # aim_repo: "/home/yb107/cvpr2025/DukeDiffSeg/aim/"
+  aim_repo: "/home/yb107/cvpr2025/aim_repo/dukediffseg6_0"
+
+# =========================
+# Data
+# ========================= 
+data:
+  description: "Mixed Mobina Colon Data (full 96^3 volumes)"
+  num_classes: 13                 # background + 12 organs (original label space)
+  condition_labels: [3,4,5,6,7,8,9,10,11,12]  # colon + small bowel
+  use_spacing_maps: false
+  spacing_channels: 3             # (dx, dy, dz)
+  orientation: "RAS"
+  # pixdim: [1.5, 1.5, 2.0]
+  pixdim: [2.0, 2.0, 2.0]
+  roi_size: [128, 128, 128]
+  # roi_size: [96, 96, 96]
+  # roi_size: [128, 128, 128]
+  slice_axis: 2
+  body_filled_channel: true
+
+  # cache_dir: "/data/usr/yb107/colon_data/cache_mobina_mixed_colon_dataset_body_filled_tmp"
+  cache_dir: "/data/usr/yb107/colon_data/cache_diffunet_v6_1"
+  # cache_dir: "/data/usr/yb107/colon_data/cache_diffunet_v7"
+  # cache_dir: "/data/usr/yb107/colon_data/cache_diffunet_v7_body_filled"
+  # cache_dir: "/data/usr/yb107/colon_data/cache_diffunet_v6_1_x96"
+
+  cache_n_transforms: 'all' # 9 or all
+
+  train_jsonl: "/home/yb107/cvpr2025/DukeDiffSeg/data/mobina_mixed_colon_dataset/mobina_mixed_colon_dataset_with_body_filled_train.jsonl"
+  val_jsonl:  "/home/yb107/cvpr2025/DukeDiffSeg/data/mobina_mixed_colon_dataset/mobina_mixed_colon_dataset_with_body_filled_val.jsonl"
+
+  batch_size_per_gpu: 1
+  num_workers_per_gpu: 4
+  val_batch_size: 1
+  val_num_workers: 4
+  shuffle_train_data: true
+  save_data: false
+
+  generation_order: [5,12,6,7,4,9,11,10,2,1,3] # 7 => 7 & 8 (left & right kidneys)
+  # Liver -> gallbladder -> spleen -> kidneys -> stomach -> pancrease -> duodenum -> urinary_bladder -> rectum -> colon -> small_bowel
+
+# ───────────────────────────────────────────────────────────
+# Model architecture (easy to swap out a different 'model.params' block)
+model:
+  name: "DiffUNet"
+  
+  adverserial_train:
+    enabled: false
+    start_epoch: 100
+    adverserial_loss_weight: 0.01
+  
+  pca_likelihood:
+    enabled: false
+    pca_model_path: "/home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-colon/4.2/colon_pca_cov_eig.pt"
+
+  volume_embedding:
+    enabled: true
+    embedding_dim: 128
+    is_discrete: false
+    # num_embeddings: 16
+    # commitment_cost: 0.25
+    # decay: 0.99
+
+  params:
+    spatial_dims: 3
+    in_channels:  2 # Overridden 
+    out_channels: 1 # Overridden 
+    # features: [32, 64, 128, 256, 512]
+    features: [32, 64, 64, 128, 256]
+    attention_levels: [False, False, False, False, False]
+    num_head_channels: [0, 0, 0, 64, 64]
+    # num_head_channels: null
+    activation: ["LeakyReLU", {"negative_slope": 0.1, "inplace": False}]
+    beta_schedule: "linear"
+    use_spacing_info: false  # Use spacing information in the model
+
+    dropout: 0.0
+    use_checkpointing: true
+    cross_attention_dim: 128  # Dimension of the cross-attention conditioning vector
+
+# ───────────────────────────────────────────────────────────
+# Diffusion-specific hyperparameters
+diffusion:
+  diffusion_steps:   1000
+  ddim_steps:      10
+  # beta_schedule:    "linear" # Options: "linear", "cosine", 
+  beta_schedule:    "scaled_linear_beta" # Options: "linear", "cosine", 
+  # model_mean_type:  "start_x" # Options: "eps", "start_x"
+  model_mean_type:  "sample" # Options Monai: "epsilon", "v_prediction", "sample" 
+  guidance_scale: 1.0      # Scale for classifier-free guidance
+  condition_drop_prob: 0.3  # Probability of dropping the condition for classifier-free guidance
+
+  schedule_sampler:
+    name: "uniform"
+    max_steps: 1000
+ 
+  clip_denoised:     true
+  ddim:              false
+
+
+# task: "liver"
+task: "colon"
+
+constraint: "binary"
+  
+
+# =========================
+# Training runtime
+# =========================
+training:
+  inference_mode: false
+  
+  epochs: 3000
+  device: "cuda"
+  save_dir: "/home/yb107/cvpr2025/DukeDiffSeg/outputs"
+  save_interval: 5
+  start_epoch: null
+  num_gpus: 1
+  save_config_yaml: true
+  accumulate_grad_steps: 1
+
+
+
+
+optimizer:
+  name:       "AdamW"
+  lr: 1e-4
+  # weight_decay: 1e-4
+  # lr:         2e-5
+  weight_decay: 1e-3
+  set_to_none: true  # Set optimizer parameters to None for memory efficiency
+
+
+# =========================
+# Exponential moving average (EMA)
+# =========================
+ema:
+  enable: false
+  rate: 0.9999
+
+
+# =========================
+# LR Scheduler (applied to Stage-2 trainer)
+# =========================
+lr_scheduler:
+  name: "LinearWarmupCosineAnnealingLR"
+  warmup_epochs: 50
+  max_epochs: 300
+
+
+evaluation:
+  validation_interval: 20
+  validation_max_num_samples: 40
+  metrics: ["Mean Dice"]
+  early_stopping:
+    enabled: true
+    patience: 200
+  visualize: true
+  visualize_every_iter: 2
+  save_checkpoints: true
+
+  save_outputs:
+    enabled: true                # dump inputs/outputs during validation
+    dir: ${training.save_dir}/inference/
+    dir_postfix: "${task}_inference_test"
+    save_inputs: false             # also save ground truth label
+    save_config_yaml: true
+    pred_postfix: "pred"
+    label_postfix: "label"
+    input_postfix: "input"
+
+
+amp:
+  enabled: false
+  fp16_scale_growth: 1e-3
+
+
+
+# ========================= Resume training for organ-specific tasks
+liver:
+  predictions_dir: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/final_results/inference_liver_inference_test
+  resume: 
+    path: null
+    # path: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/checkpoints/liver/DiffUnet-binary-iterative_liver_best_checkpoint_260_MeanDice0.7706.pt
+    restore_optimizer: true
+    restore_scheduler: true
+    restore_ema: true
+    restore_discriminator: false
+
+colon:
+  predictions_dir: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-colon/5.1/inference_colon_inference_test
+  resume:
+    path: null
+    # path: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-colon/5.1/checkpoints/training/DiffUnet-binary-colon_training_latest_checkpoint_550.pt
+    # path: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/checkpoints/colon/DiffUnet-binary-iterative_colon_latest_checkpoint_40.pt
+    restore_optimizer: true
+    restore_scheduler: true
+    restore_ema: true
+    restore_discriminator: false
+
+small_bowel:
+  predictions_dir: null
+  resume:
+    path: null
+    restore_optimizer: true
+    restore_scheduler: true
+    restore_ema: true
+    restore_discriminator: false
+
+all_organs:
+  predictions_dir: null
+  resume:
+    path: null
+    restore_optimizer: true
+    restore_scheduler: true
+    restore_ema: true
+    restore_discriminator: false
+
+kidneys:
+  predictions_dir: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/final_results/inference_kidneys_inference_test
+  resume:
+    path: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/checkpoints/kidneys/DiffUnet-binary-iterative_kidneys_best_checkpoint_340_MeanDice0.6373.pt
+    restore_optimizer: true
+    restore_scheduler: true
+    restore_ema: true
+    restore_discriminator: false
+
+spleen:
+  predictions_dir: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/final_results/inference_spleen_inference_test
+  resume:
+    path: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/checkpoints/spleen/DiffUnet-binary-iterative_spleen_best_checkpoint_530_MeanDice0.5500.pt
+    restore_optimizer: true
+    restore_scheduler: true
+    restore_ema: true
+    restore_discriminator: false
+
+pancreas:
+  predictions_dir: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/final_results/inference_pancreas_inference_test
+  resume:
+    path: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/checkpoints/pancreas/DiffUnet-binary-iterative_pancreas_best_checkpoint_390_MeanDice0.5408.pt
+    restore_optimizer: true
+    restore_scheduler: true
+    restore_ema: true
+    restore_discriminator: false
+
+gallbladder:
+  predictions_dir: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/final_results/inference_gallbladder_inference_test
+  resume:
+    path: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/checkpoints/gallbladder/DiffUnet-binary-iterative_gallbladder_best_checkpoint_890_MeanDice0.5690.pt
+    restore_optimizer: true
+    restore_scheduler: true
+    restore_ema: true
+    restore_discriminator: false
+
+urinary_bladder:
+  predictions_dir: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/final_results/inference_urinary_bladder_inference_test
+  resume:
+    path: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/checkpoints/urinary_bladder/DiffUnet-binary-iterative_urinary_bladder_best_checkpoint_390_MeanDice0.5461.pt
+    restore_optimizer: true
+    restore_scheduler: true
+    restore_ema: true
+    restore_discriminator: false
+
+stomach:
+  predictions_dir: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/final_results/inference_stomach_inference_test  
+  resume:
+    path: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/checkpoints/stomach/DiffUnet-binary-iterative_stomach_best_checkpoint_430_MeanDice0.6567.pt
+    restore_optimizer: true
+    restore_scheduler: true
+    restore_ema: true
+    restore_discriminator: false
+
+duodenum:
+  predictions_dir: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/final_results/inference_duodenum_inference_test
+  resume:
+    path: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/checkpoints/duodenum/DiffUnet-binary-iterative_duodenum_best_checkpoint_340_MeanDice0.5296.pt
+    restore_optimizer: true
+    restore_scheduler: true
+    restore_ema: true
+    restore_discriminator: false
+
+rectum:
+  predictions_dir: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/final_results/inference_rectum_inference_test
+  resume:
+    path: /home/yb107/cvpr2025/DukeDiffSeg/outputs/diffunet-binary-iterative/6.0/checkpoints/rectum/DiffUnet-binary-iterative_rectum_best_checkpoint_350_MeanDice0.5739.pt
+    restore_optimizer: true
+    restore_scheduler: true
+    restore_ema: true
+    restore_discriminator: false
